@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="description" content="AI-powered mock interview practice partner with voice and chat input. Get real-time feedback powered by LangGraph and Groq." />
+  <title>Interview Practice Partner — AI Mock Interviewer</title>
+  <link rel="stylesheet" href="style.css" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+</head>
+<body>
+
+  <div class="app-container" role="main">
+
+    <!-- ── Header ──────────────────────────────────────────── -->
+    <header class="header" aria-label="Application header">
+      <div class="header-brand">
+        <div class="header-icon" aria-hidden="true">🎯</div>
+        <div>
+          <h1 class="header-title">Interview Practice Partner</h1>
+          <p class="header-subtitle">AI-powered mock interviews with instant feedback</p>
+        </div>
+      </div>
+
+      <div class="status-bar" aria-live="polite" aria-label="Interview status">
+        <div id="status-badge" class="status-badge idle" role="status">
+          <span class="status-dot" aria-hidden="true"></span>
+          <span id="status-text">Ready</span>
+        </div>
+        <span id="session-info" class="session-info" aria-label="Session information"></span>
+      </div>
+    </header>
+
+    <!-- ── Backend Error Banner ────────────────────────────── -->
+    <div id="backend-error" class="backend-error" role="alert" aria-live="assertive"></div>
+
+    <!-- ── Permission Warning ───────────────────────────────── -->
+    <div id="permission-warning" class="permission-warning" role="alert" aria-live="assertive">
+      <span class="warn-icon" aria-hidden="true">⚠️</span>
+      <span>Microphone access was denied. Text input is your primary mode — type your answers below.</span>
+    </div>
+
+    <!-- ── Conversation Transcript ──────────────────────────── -->
+    <section class="conversation-panel" aria-label="Interview conversation">
+      <div class="panel-header">
+        <span class="panel-title">Conversation</span>
+        <div class="transcript-actions">
+          <button id="btn-clear-transcript" class="btn-ghost" aria-label="Clear transcript">
+            Clear
+          </button>
+        </div>
+      </div>
+      <div
+        id="transcript"
+        role="log"
+        aria-label="Interview transcript"
+        aria-live="polite"
+        aria-relevant="additions"
+      >
+        <div class="transcript-empty" id="transcript-empty">
+          <div class="transcript-empty-icon" aria-hidden="true">💬</div>
+          <p>Your interview conversation will appear here.</p>
+          <p style="color: var(--text-muted); font-size: 0.78rem;">Tell me what role you'd like to practice for to get started.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── Input Zone ────────────────────────────────────────── -->
+    <div class="input-zone" aria-label="Input controls">
+
+      <!-- Text + Mic row -->
+      <div class="input-row">
+        <!-- Text input (always visible, visually primary) -->
+        <div class="text-input-wrapper">
+          <textarea
+            id="text-input"
+            placeholder="Type your answer here, or use the mic button… (Shift+Enter for new line)"
+            rows="1"
+            aria-label="Text input for your answer"
+            aria-describedby="input-hint"
+          ></textarea>
+          <button
+            id="btn-send"
+            class="send-btn"
+            aria-label="Send message"
+            title="Send"
+            disabled
+          >↑</button>
+        </div>
+
+        <!-- Mic button -->
+        <div class="mic-area">
+          <button
+            id="btn-mic"
+            class="mic-btn"
+            aria-label="Start voice recording"
+            aria-pressed="false"
+            title="Click to record your answer"
+          >
+            🎤
+          </button>
+          <span class="mic-label" aria-hidden="true">Mic</span>
+        </div>
+      </div>
+
+      <!-- Progress + stage + end interview row -->
+      <div class="controls-row">
+        <div class="progress-section" id="progress-section" aria-label="Interview progress">
+          <div class="progress-meta">
+            <span class="progress-label" id="progress-label">Q 0 / 6</span>
+            <span id="stage-label" class="stage-label" aria-label="Current interview stage"></span>
+          </div>
+          <div class="progress-bar" role="progressbar" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100" aria-label="Interview progress">
+            <div class="progress-fill" id="progress-fill"></div>
+          </div>
+        </div>
+
+        <span id="interim-text" class="interim-text" aria-label="Live speech transcript" aria-live="polite"></span>
+
+        <button
+          id="btn-end-interview"
+          class="btn-end-interview"
+          aria-label="End interview and generate feedback"
+          disabled
+        >
+          <span aria-hidden="true">⏹</span> End Interview
+        </button>
+      </div>
+
+      <!-- Screen reader hint -->
+      <p id="input-hint" class="sr-only">
+        Press Enter to send, Shift+Enter for a new line. Use the microphone button to speak your answer.
+      </p>
+    </div>
+
+    <!-- ── Feedback Panel ────────────────────────────────────── -->
+    <section
+      id="feedback-panel"
+      class="feedback-panel"
+      aria-label="Interview feedback"
+      aria-live="polite"
+    >
+      <div class="feedback-header">
+        <div class="feedback-header-top">
+          <div>
+            <h2 id="feedback-title">🏆 Your Interview Feedback</h2>
+            <p id="feedback-subtitle">Here's your personalized performance analysis.</p>
+          </div>
+          <!-- Readiness score ring -->
+          <div id="score-ring" class="score-ring" aria-label="Readiness score" style="display:none">
+            <span id="score-value" class="score-value">—</span>
+            <span class="score-denom">/10</span>
+            <span class="score-ring-label">Readiness</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="feedback-grid" id="feedback-grid">
+        <!-- Feedback cards injected by JS -->
+      </div>
+
+      <div class="feedback-actions">
+        <button id="btn-copy-feedback" class="btn-copy" aria-label="Copy feedback to clipboard">
+          <span aria-hidden="true">📋</span> Copy Feedback
+        </button>
+        <button id="btn-restart" class="btn-restart" aria-label="Start a new interview session">
+          <span aria-hidden="true">🔄</span> Start New Interview
+        </button>
+      </div>
+    </section>
+
+  </div><!-- /.app-container -->
+
+  <!-- ── Toast Container ──────────────────────────────────────── -->
+  <div id="toast-container" aria-live="assertive" aria-atomic="false" role="status"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>

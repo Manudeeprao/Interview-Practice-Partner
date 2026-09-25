@@ -85,7 +85,28 @@ def _get_role_topics(role: str) -> list:
     return DEFAULT_TOPICS
 
 
-def get_interviewer_system_prompt(role: str, stage: str = "behavioral") -> str:
+def get_difficulty_guidance(difficulty: str = "medium") -> str:
+    """Prompt language that adapts question depth to the candidate's performance."""
+    level = (difficulty or "medium").lower()
+    if level == "easy":
+        return (
+            "DIFFICULTY: EASY. The candidate needs a more accessible question. "
+            "Use simpler language, one clear focus, and invite a concrete example. "
+            "Avoid stacked constraints, rare edge cases, or multi-part design problems."
+        )
+    if level == "hard":
+        return (
+            "DIFFICULTY: HARD. The candidate has been answering strongly. "
+            "Increase depth: trade-offs, failure modes, scale, measurement, and why alternatives were rejected. "
+            "Still ask ONE question. Do not become hostile or trick-oriented."
+        )
+    return (
+        "DIFFICULTY: MEDIUM. Ask a standard professional interview question with enough room "
+        "for a specific example, but do not over-complicate it."
+    )
+
+
+def get_interviewer_system_prompt(role: str, stage: str = "behavioral", difficulty: str = "medium") -> str:
     """
     Role-adaptive, stage-aware system prompt.
 
@@ -115,13 +136,14 @@ def get_interviewer_system_prompt(role: str, stage: str = "behavioral") -> str:
         "introduction": (
             f"This is the FIRST question. Briefly introduce yourself as the interviewer "
             f"(e.g. 'Hi, I'll be conducting your {role} interview today.'), then ask "
-            f"a warm-up question about their background, experience, or interest in the {role} role. "
+            f"a warm-up question inviting the candidate to introduce themselves and mention the most relevant "
+            f"internship, project, or certification from their resume for the {role} role. "
             f"Keep it conversational and not technical."
         ),
         "project_discussion": (
-            f"Ask the candidate to tell you about a project or professional experience they've worked on. "
-            f"Focus on: project scope, their role, challenges faced, technologies used, and lessons learned. "
-            f"This is an opportunity to understand their practical experience."
+            f"Ask the candidate to tell you about a project, internship, or certification experience from their resume. "
+            f"Focus on: project scope, their role, technical decisions, challenges faced, measurable outcomes, and lessons learned. "
+            f"If the resume mentions certifications or internships, ask how those specifically contributed to their skills or project work."
         ),
         "technical_fundamentals": (
             f"Ask a CORE TECHNICAL question that tests fundamental knowledge for {role}. "
@@ -182,6 +204,8 @@ INTERVIEW STRUCTURE (7 questions total):
 CURRENT STAGE: {stage.upper()}
 {current_stage_guidance}
 
+{get_difficulty_guidance(difficulty)}
+
 Current role (fixed): {role}"""
 
 
@@ -216,10 +240,16 @@ Classify the candidate's last answer into EXACTLY ONE of these four categories:
 - OFF_TOPIC: The answer goes on a tangent unrelated to the interview question (e.g., talking about unrelated life events, going on long digressions).
 - OUT_OF_SCOPE: The candidate is asking the AI to do something outside an interview (e.g., "write my resume", "give me the answer", "tell me what to say", "what's the weather").
 
-Respond ONLY with valid JSON in this exact format, nothing else:
-{"classification": "GOOD", "reason": "One-line explanation"}
+Also rate answer strength:
+- strong: specific evidence, metrics, trade-offs, or a clear STAR-style story
+- adequate: on-topic and enough to proceed, but not especially deep
+- weak: thin, generic, or incomplete even if it is still relevant
 
-The classification field must be one of: GOOD, VAGUE, OFF_TOPIC, OUT_OF_SCOPE"""
+Respond ONLY with valid JSON in this exact format, nothing else:
+{"classification": "GOOD", "strength": "adequate", "reason": "One-line explanation"}
+
+The classification field must be one of: GOOD, VAGUE, OFF_TOPIC, OUT_OF_SCOPE
+The strength field must be one of: strong, adequate, weak"""
 
 
 # ---------------------------------------------------------------------------
@@ -273,6 +303,7 @@ Other rules:
 - The improvementAreas array must contain 2-4 specific, actionable items.
 - Each improvement area MUST reference a specific answer or moment from the transcript.
 - The strengths field must cite specific answers that were strong.
+- If resume context is provided, incorporate it into the evaluation and mention how resume projects, internships, or certifications supported the candidate's performance.
 - Be honest and constructive — this feedback helps the candidate improve.
 - Tailor ALL feedback to the specific role being interviewed for."""
 
@@ -286,6 +317,7 @@ Guidelines:
 - Ask for concrete details: specific situations, measurable outcomes, their personal actions.
 - Keep the follow-up question brief and focused (1-2 sentences max).
 - If the candidate is chatty or goes off-topic, make the follow-up very narrow and ask for one concrete detail.
+- If difficulty is EASY, make the clarification simpler and more scaffolding (invite one example).
 - Maintain the interviewer persona — do not break character.
 - IMPORTANT: The follow-up must remain relevant to the selected job role."""
 

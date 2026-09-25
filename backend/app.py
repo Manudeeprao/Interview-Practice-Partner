@@ -1,421 +1,317 @@
 """
 Flask application for the Interview Practice Partner backend.
 
-Routes:
-  POST /chat      — Accepts user message + session state, runs LangGraph, returns agent response
-  POST /feedback  — Accepts full transcript, runs generate_feedback_node, returns structured JSON
-  GET  /health    — Health check endpoint
-
-Architecture:
-  Per-session state is stored in memory (dict keyed by session_id).
-  The LangGraph graph is compiled once at startup and invoked per-turn.
-  
-  Because the interview pauses between turns for user input, we don't run the
-  full graph end-to-end in one call. Instead, each POST /chat runs the graph
-  starting from the appropriate entry node (determined by session state), 
-  advances until the next user-input pause, and returns the agent's response.
+Each POST /chat resumes the compiled LangGraph checkpoint for that session.
+InterviewState is persisted as JSON in SQLite.
 """
 
-import os
+from __future__ import annotations
+
 import logging
+import os
 import uuid
-import random
-from flask import Flask, request, jsonify
+
+from flask import Flask, current_app, jsonify, request
 from flask_cors import CORS
 from dotenv import load_dotenv
 
-# Load .env before anything else
 load_dotenv()
 
-from graph.nodes import (
-    role_intake_node,
-    ask_question_node,
-    classify_answer_node,
-    follow_up_node,
-    next_question_node,
-    redirect_node,
-    decline_node,
-    generate_feedback_node,
-)
+from graph.graph import get_interview_graph
+from graph.nodes import generate_feedback_node
+from graph.state import STAGE_INTERVIEW_ACTIVE, STAGE_ROLE_SELECTION, create_initial_state
+from rag.retriever import ResumeRetriever
+from storage import SessionStore
 
-# ---------------------------------------------------------------------------
-# Logging
-# ---------------------------------------------------------------------------
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Flask App
-# ---------------------------------------------------------------------------
-app = Flask(__name__)
-CORS(app)  # Allow all origins for local development
-
-# ---------------------------------------------------------------------------
-# In-memory session store
-# Format: { session_id: InterviewState }
-# ---------------------------------------------------------------------------
-sessions: dict = {}
-
-MAX_SESSIONS = 100  # simple cap to avoid unbounded memory growth
+MAX_SESSIONS = 100
+MAX_RESUME_BYTES = 5 * 1024 * 1024
 
 
-def create_initial_state(session_id: str) -> dict:
-    """Create a fresh InterviewState for a new session."""
-    return {
-        "session_id": session_id,
-        "role": None,
-        "role_confirmed": False,
-        "main_question_count": 0,
-        "follow_up_count": 0,
-        "is_follow_up": False,
-        "max_questions": 7,  # Fixed to 7 for balanced interview: intro(1) + project(2) + technical(2) + system_design(1) + behavioral(1)
-        "interview_stage": STAGE_ROLE_SELECTION,
-        "previous_questions": [],
-        "user_answers": [],
-        "current_question": None,
-        "history": [],
-        "last_user_message": "",
-        "classification": None,
-        "classification_reason": None,
-        "agent_response": None,
-        "next_node": "role_intake_node",
-        "project_question_count": 0,  # Tracks project-related questions (max 2)
-        "feedback": None,
-        "done": False,
-        "error": None,
-    }
+def _checkpoint_config(session_id: str) -> dict:
+    return {"configurable": {"thread_id": session_id}}
 
 
-# ---------------------------------------------------------------------------
-# Node dispatcher — manually routes to the right node based on state
-# ---------------------------------------------------------------------------
-NODE_MAP = {
-    "role_intake_node": role_intake_node,
-    "ask_question_node": ask_question_node,
-    "classify_answer_node": classify_answer_node,
-    "follow_up_node": follow_up_node,
-    "next_question_node": next_question_node,
-    "redirect_node": redirect_node,
-    "decline_node": decline_node,
-    "generate_feedback_node": generate_feedback_node,
-}
+def _snapshot_has_values(snapshot) -> bool:
+    if snapshot is None:
+        return False
+    values = getattr(snapshot, "values", None)
+    return bool(values)
 
 
-# ---------------------------------------------------------------------------
-# Interview stage constants
-# ---------------------------------------------------------------------------
-STAGE_ROLE_SELECTION    = "ROLE_SELECTION"
-STAGE_INTERVIEW_ACTIVE  = "INTERVIEW_ACTIVE"
-STAGE_FEEDBACK          = "FEEDBACK_GENERATION"
-STAGE_COMPLETE          = "INTERVIEW_COMPLETE"
-
-# Nodes that are legal only during ROLE_SELECTION stage
-ROLE_SELECTION_NODES = {"role_intake_node"}
-
-# Nodes that are legal during INTERVIEW_ACTIVE stage
-INTERVIEW_ACTIVE_NODES = {
-    "classify_answer_node", "follow_up_node",
-    "next_question_node", "redirect_node",
-    "decline_node", "ask_question_node",
-    "generate_feedback_node",
-}
-
-
-def run_turn(state: dict, user_message: str) -> dict:
-    """
-    Run one conversation turn through the LangGraph nodes.
-
-    Stage-aware dispatch:
-      - ROLE_SELECTION:   only role_intake_node is allowed
-      - INTERVIEW_ACTIVE: role_intake_node is FORBIDDEN; routes through
-                          classify -> follow_up / next_question / redirect / decline
-      - FEEDBACK_GENERATION / INTERVIEW_COMPLETE: handled by generate_feedback_node
-    """
-    state = dict(state)  # shallow copy
+def run_turn(state: dict, user_message: str, graph=None) -> dict:
+    """Resume the compiled interview graph for one HTTP conversation turn."""
+    graph = graph or current_app.config["INTERVIEW_GRAPH"]
+    state = dict(state)
     state["last_user_message"] = user_message
+    session_id = state["session_id"]
+    config = _checkpoint_config(session_id)
 
-    role_confirmed  = state.get("role_confirmed", False)
-    interview_stage = state.get("interview_stage", STAGE_ROLE_SELECTION)
-    next_node       = state.get("next_node", "role_intake_node")
-
-    # ── Stage guard ───────────────────────────────────────────────────────
-    # Once the interview is active, NEVER route back to role_intake_node.
-    # This prevents user interview answers containing role keywords (e.g.
-    # "I worked as a data analyst") from being mis-detected as role selection.
-    if role_confirmed and next_node in ROLE_SELECTION_NODES:
-        logger.warning(
-            "[STAGE GUARD] interview_stage=%s, role_confirmed=True but next_node=%s. "
-            "Forcing classify_answer_node to prevent role re-detection.",
-            interview_stage, next_node,
-        )
-        next_node = "classify_answer_node"
-        state["next_node"] = "classify_answer_node"
-
-    # Ensure interview_stage is correct for active interviews
-    if role_confirmed and interview_stage == STAGE_ROLE_SELECTION:
-        state["interview_stage"] = STAGE_INTERVIEW_ACTIVE
-        interview_stage = STAGE_INTERVIEW_ACTIVE
-
-    # ── Debug header log ─────────────────────────────────────────────────
     logger.info(
-        "[TURN START] Stage=%s | Role=%s | Q=%d/%d | StartNode=%s | Msg='%s'",
-        interview_stage,
+        "[TURN START] Stage=%s | Role=%s | Q=%d/%d | Difficulty=%s | Msg='%s'",
+        state.get("interview_stage", STAGE_ROLE_SELECTION),
         state.get("role", "(none)"),
         state.get("main_question_count", 0),
-        state.get("max_questions", 6),
-        next_node,
+        state.get("max_questions", 7),
+        state.get("difficulty", "medium"),
         user_message[:60],
     )
 
-    MAX_AUTO_STEPS = 6
-    steps = 0
+    snapshot = graph.get_state(config)
+    if _snapshot_has_values(snapshot):
+        graph.update_state(config, {"last_user_message": user_message})
+        result = graph.invoke(None, config=config)
+    else:
+        result = graph.invoke(state, config=config)
 
-    while steps < MAX_AUTO_STEPS:
-        steps += 1
-        node_fn = NODE_MAP.get(next_node)
+    if not isinstance(result, dict) or not result:
+        latest = graph.get_state(config)
+        result = dict(getattr(latest, "values", {}) or state)
 
-        if not node_fn:
-            # Safe fallback: never route to role_intake_node if interview is active
-            if role_confirmed:
-                logger.error(
-                    "Unknown node '%s' during active interview — "
-                    "falling back to classify_answer_node (NOT role_intake_node).",
-                    next_node,
-                )
-                node_fn = classify_answer_node
-                next_node = "classify_answer_node"
-            else:
-                logger.error(
-                    "Unknown node '%s' before role confirmed — "
-                    "falling back to role_intake_node.",
-                    next_node,
-                )
-                node_fn = role_intake_node
-                next_node = "role_intake_node"
+    merged = {**state, **result}
+    if merged.get("role_confirmed") and merged.get("interview_stage") == STAGE_ROLE_SELECTION:
+        merged["interview_stage"] = STAGE_INTERVIEW_ACTIVE
 
-        logger.info(
-            "[NODE] Running %s (step %d) | Stage=%s | Q=%d",
-            next_node, steps, state.get("interview_stage", "?"),
-            state.get("main_question_count", 0),
-        )
-        current_node = next_node
-        updates = node_fn(state)
-        state.update(updates)
-        next_node = state.get("next_node", "")
-
-        # Update role_confirmed from state in case it just got set this step
-        role_confirmed = state.get("role_confirmed", False)
-
-        # Sync interview_stage: as soon as role is confirmed, mark INTERVIEW_ACTIVE
-        if role_confirmed and state.get("interview_stage") == STAGE_ROLE_SELECTION:
-            state["interview_stage"] = STAGE_INTERVIEW_ACTIVE
-
-        # Stop conditions: agent has a response ready for the user
-        if next_node in ("classify_answer_node", "__end__", "") or state.get("done"):
-            break
-
-        # Self-loop detection
-        if next_node == current_node:
-            logger.info("[LOOP] Self-loop at %s — returning response to user.", current_node)
-            break
-
-    # ── Debug footer log ─────────────────────────────────────────────────
     logger.info(
-        "[TURN END] Stage=%s | Q=%d/%d | Classification=%s | NextNode=%s | Done=%s",
-        state.get("interview_stage", "?"),
-        state.get("main_question_count", 0),
-        state.get("max_questions", 6),
-        state.get("classification", "N/A"),
-        state.get("next_node", "???"),
-        state.get("done", False),
+        "[TURN END] Stage=%s | Q=%d/%d | Classification=%s | Difficulty=%s | NextNode=%s | Done=%s",
+        merged.get("interview_stage", "?"),
+        merged.get("main_question_count", 0),
+        merged.get("max_questions", 7),
+        merged.get("classification", "N/A"),
+        merged.get("difficulty", "medium"),
+        merged.get("next_node", "???"),
+        merged.get("done", False),
     )
-
-    return state
-
-
-# ---------------------------------------------------------------------------
-# Routes
-# ---------------------------------------------------------------------------
-@app.route("/health", methods=["GET"])
-def health():
-    return jsonify({"status": "ok", "sessions": len(sessions)})
+    return merged
 
 
-@app.route("/chat", methods=["POST"])
-def chat():
-    """
-    POST /chat
-    Request body:
-      {
-        "session_id": "optional-uuid",
-        "message": "user's text input"
-      }
-    
-    Response:
-      {
-        "session_id": "...",
-        "response": "agent's response text",
-        "done": false,
-        "feedback": null,
-        "state_info": { "role": "...", "main_question_count": 3, "node": "..." }
-      }
-    """
-    try:
-        data = request.get_json()
-        if not data:
-            return jsonify({"error": "Request body must be JSON"}), 400
+def create_app(
+    session_store: SessionStore | None = None,
+    interview_graph=None,
+    resume_retriever: ResumeRetriever | None = None,
+) -> Flask:
+    app = Flask(__name__)
+    CORS(app)
 
-        user_message = data.get("message", "").strip()
-        if not user_message:
-            return jsonify({"error": "message field is required"}), 400
+    app.config["SESSION_STORE"] = session_store or SessionStore(max_sessions=MAX_SESSIONS)
+    app.config["INTERVIEW_GRAPH"] = interview_graph or get_interview_graph()
+    app.config["RESUME_RETRIEVER"] = resume_retriever or ResumeRetriever()
 
-        session_id = data.get("session_id") or str(uuid.uuid4())
+    register_routes(app)
+    return app
 
-        # Retrieve or create session
-        if session_id not in sessions:
-            # Clean up oldest session if at cap
-            if len(sessions) >= MAX_SESSIONS:
-                oldest_key = next(iter(sessions))
-                del sessions[oldest_key]
-                logger.info("Evicted oldest session: %s", oldest_key)
-            sessions[session_id] = create_initial_state(session_id)
-            logger.info("New session created: %s", session_id)
 
-        state = sessions[session_id]
+def register_routes(app: Flask) -> None:
+    @app.route("/health", methods=["GET"])
+    def health():
+        store: SessionStore = current_app.config["SESSION_STORE"]
+        return jsonify({"status": "ok", "sessions": store.count()})
 
-        # Don't accept new messages if interview is done
-        if state.get("done"):
+    @app.route("/chat", methods=["POST"])
+    def chat():
+        try:
+            data = request.get_json()
+            if not data:
+                return jsonify({"error": "Request body must be JSON"}), 400
+
+            user_message = data.get("message", "").strip()
+            if not user_message:
+                return jsonify({"error": "message field is required"}), 400
+
+            session_id = data.get("session_id") or str(uuid.uuid4())
+            store: SessionStore = current_app.config["SESSION_STORE"]
+            store.ensure_capacity()
+
+            state = store.get(session_id)
+            if state is None:
+                state = create_initial_state(session_id)
+                store.save(state)
+                logger.info("New session created: %s", session_id)
+
+            if state.get("done"):
+                return jsonify({
+                    "session_id": session_id,
+                    "response": "The interview has ended. Please refresh to start a new session.",
+                    "done": True,
+                    "feedback": state.get("feedback"),
+                    "state_info": _state_info(state),
+                })
+
+            updated_state = run_turn(state, user_message)
+            store.save(updated_state)
+
+            agent_response = updated_state.get("agent_response", "I'm here — please go ahead.")
+            logger.info(
+                ">>> TURN RESULT: classification=%s, strength=%s, difficulty=%s, "
+                "main_question_count=%d/%d, next_node=%s",
+                updated_state.get("classification", "N/A"),
+                updated_state.get("answer_strength", "N/A"),
+                updated_state.get("difficulty", "medium"),
+                updated_state.get("main_question_count", 0),
+                updated_state.get("max_questions", 7),
+                updated_state.get("next_node", "???"),
+            )
+
             return jsonify({
                 "session_id": session_id,
-                "response": "The interview has ended. Please refresh to start a new session.",
-                "done": True,
-                "feedback": state.get("feedback"),
-                "state_info": _state_info(state),
+                "response": agent_response,
+                "done": updated_state.get("done", False),
+                "feedback": updated_state.get("feedback"),
+                "state_info": _state_info(updated_state),
             })
 
-        # Run the turn through the graph
-        updated_state = run_turn(state, user_message)
-        sessions[session_id] = updated_state
+        except Exception as e:
+            logger.exception("Error in /chat endpoint: %s", e)
+            payload = data if "data" in locals() else {}
+            return jsonify({
+                "error": "An internal error occurred. Please try again.",
+                "session_id": payload.get("session_id", "") if payload else "",
+                "response": "I'm sorry, I hit a technical glitch. Could you repeat that?",
+                "done": False,
+            }), 500
 
-        agent_response = updated_state.get("agent_response", "I'm here — please go ahead.")
+    @app.route("/feedback", methods=["POST"])
+    def feedback():
+        try:
+            data = request.get_json()
+            if not data:
+                return jsonify({"error": "Request body must be JSON"}), 400
 
-        # ── Per-turn debug log ────────────────────────────────────────────────
-        logger.info(
-            ">>> TURN RESULT: classification=%s, main_question_count=%d/%d, "
-            "follow_up_count=%d, is_follow_up=%s, next_node=%s",
-            updated_state.get("classification", "N/A"),
-            updated_state.get("main_question_count", 0),
-            updated_state.get("max_questions", 6),
-            updated_state.get("follow_up_count", 0),
-            updated_state.get("is_follow_up", False),
-            updated_state.get("next_node", "???"),
-        )
+            session_id = data.get("session_id", "")
+            transcript = data.get("transcript", [])
+            store: SessionStore = current_app.config["SESSION_STORE"]
 
-        return jsonify({
-            "session_id": session_id,
-            "response": agent_response,
-            "done": updated_state.get("done", False),
-            "feedback": updated_state.get("feedback"),
-            "state_info": _state_info(updated_state),
-        })
+            state = store.get(session_id) if session_id else None
+            if state:
+                state["done"] = False
+                feedback_updates = generate_feedback_node(state)
+                updated = {**state, **feedback_updates}
+                store.save(updated)
+                return jsonify({"feedback": feedback_updates.get("feedback", {})})
 
-    except Exception as e:
-        logger.exception("Error in /chat endpoint: %s", e)
-        return jsonify({
-            "error": "An internal error occurred. Please try again.",
-            "session_id": data.get("session_id", "") if data else "",
-            "response": "I'm sorry, I hit a technical glitch. Could you repeat that?",
-            "done": False,
-        }), 500
-
-
-@app.route("/feedback", methods=["POST"])
-def feedback():
-    """
-    POST /feedback
-    Directly triggers generate_feedback_node on the full transcript.
-    
-    Request body:
-      {
-        "session_id": "...",
-        "transcript": [{"role": "user/assistant", "content": "..."}]
-      }
-    
-    Response:
-      {
-        "feedback": {
-          "overallImpression": "...",
-          "communication": "...",
-          "technicalKnowledge": "...",
-          "improvementAreas": ["...", "..."]
-        }
-      }
-    """
-    try:
-        data = request.get_json()
-        if not data:
-            return jsonify({"error": "Request body must be JSON"}), 400
-
-        session_id = data.get("session_id", "")
-        transcript = data.get("transcript", [])
-
-        # Use session history if available, fallback to provided transcript
-        state = sessions.get(session_id)
-        if state:
-            # Mark done and run feedback node
-            state["done"] = False  # temporarily allow feedback generation
-            feedback_updates = generate_feedback_node(state)
-            sessions[session_id] = {**state, **feedback_updates}
-            return jsonify({"feedback": feedback_updates.get("feedback", {})})
-        else:
-            # Build minimal state from provided transcript
             minimal_state = create_initial_state(session_id or "feedback-only")
             minimal_state["history"] = transcript
             minimal_state["role"] = data.get("role", "General")
             feedback_updates = generate_feedback_node(minimal_state)
             return jsonify({"feedback": feedback_updates.get("feedback", {})})
 
-    except Exception as e:
-        logger.exception("Error in /feedback endpoint: %s", e)
-        return jsonify({"error": "Failed to generate feedback. Please try again."}), 500
+        except Exception as e:
+            logger.exception("Error in /feedback endpoint: %s", e)
+            return jsonify({"error": "Failed to generate feedback. Please try again."}), 500
+
+    @app.route("/resume/upload", methods=["POST"])
+    def upload_resume():
+        try:
+            if "file" not in request.files:
+                return jsonify({"error": "Please include a resume file in the 'file' field."}), 400
+
+            uploaded_file = request.files["file"]
+            if uploaded_file.filename == "":
+                return jsonify({"error": "No file selected."}), 400
+
+            session_id = request.form.get("session_id") or str(uuid.uuid4())
+            store: SessionStore = current_app.config["SESSION_STORE"]
+            retriever: ResumeRetriever = current_app.config["RESUME_RETRIEVER"]
+            store.ensure_capacity()
+
+            state = store.get(session_id)
+            if state is None:
+                state = create_initial_state(session_id)
+                store.save(state)
+
+            file_bytes = uploaded_file.read()
+            if len(file_bytes) > MAX_RESUME_BYTES:
+                return jsonify({"error": "Resume file is too large. Please keep it under 5 MB."}), 413
+
+            filename = uploaded_file.filename or "resume"
+            suffix = os.path.splitext(filename)[1].lower()
+            if suffix not in {".pdf", ".docx"}:
+                return jsonify({"error": "Only PDF and DOCX resumes are supported."}), 400
+
+            from rag.extractor import extract_resume_text
+
+            try:
+                text = extract_resume_text(file_bytes, filename)
+            except ValueError as exc:
+                logger.warning("Resume upload rejected: %s", exc)
+                return jsonify({"error": str(exc)}), 400
+
+            if not text.strip():
+                return jsonify({"error": "The uploaded resume did not contain any readable text."}), 400
+
+            retriever.vector_store.delete_session(session_id)
+            indexed_chunks = retriever.index_resume(
+                session_id=session_id,
+                text=text,
+                metadata={"filename": filename},
+            )
+
+            state["resume_uploaded"] = True
+            state["resume_filename"] = filename
+            state["resume_chunk_count"] = len(indexed_chunks)
+            store.save(state)
+
+            graph = current_app.config["INTERVIEW_GRAPH"]
+            config = _checkpoint_config(session_id)
+            if _snapshot_has_values(graph.get_state(config)):
+                graph.update_state(
+                    config,
+                    {
+                        "resume_uploaded": True,
+                        "resume_filename": filename,
+                        "resume_chunk_count": len(indexed_chunks),
+                    },
+                )
+
+            return jsonify({
+                "session_id": session_id,
+                "message": "Resume uploaded successfully.",
+                "filename": filename,
+                "chunks": len(indexed_chunks),
+            })
+        except ValueError as exc:
+            logger.warning("Resume upload rejected: %s", exc)
+            return jsonify({"error": str(exc)}), 400
+        except Exception as exc:
+            logger.exception("Resume upload failed: %s", exc)
+            return jsonify({"error": "Failed to process the uploaded resume."}), 500
+
+    @app.route("/new_session", methods=["POST"])
+    def new_session():
+        store: SessionStore = current_app.config["SESSION_STORE"]
+        store.ensure_capacity()
+        session_id = str(uuid.uuid4())
+        store.save(create_initial_state(session_id))
+        return jsonify({"session_id": session_id})
 
 
-@app.route("/new_session", methods=["POST"])
-def new_session():
-    """Create a fresh session and return the new session_id."""
-    session_id = str(uuid.uuid4())
-    if len(sessions) >= MAX_SESSIONS:
-        oldest_key = next(iter(sessions))
-        del sessions[oldest_key]
-    sessions[session_id] = create_initial_state(session_id)
-    return jsonify({"session_id": session_id})
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 def _state_info(state: dict) -> dict:
-    """Extract minimal state info to send to the frontend for UI state management."""
     return {
         "role": state.get("role"),
         "role_confirmed": state.get("role_confirmed", False),
         "main_question_count": state.get("main_question_count", 0),
         "follow_up_count": state.get("follow_up_count", 0),
-        "max_questions": state.get("max_questions", 6),
+        "max_questions": state.get("max_questions", 7),
         "interview_stage": state.get("interview_stage", "introduction"),
         "current_node": state.get("next_node", "role_intake_node"),
         "classification": state.get("classification"),
+        "difficulty": state.get("difficulty", "medium"),
+        "answer_strength": state.get("answer_strength"),
+        "resume_uploaded": state.get("resume_uploaded", False),
     }
 
 
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
+app = None if os.getenv("IPP_TESTING") == "1" else create_app()
+
+
 if __name__ == "__main__":
     port = int(os.getenv("FLASK_PORT", 5000))
     debug = os.getenv("FLASK_ENV", "production") == "development"
     logger.info("Starting Interview Practice Partner backend on port %d", port)
-    app.run(host="0.0.0.0", port=port, debug=debug)
+    application = app or create_app()
+    application.run(host="0.0.0.0", port=port, debug=debug)

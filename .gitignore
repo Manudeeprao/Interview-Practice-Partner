@@ -34,3 +34,10 @@ Thumbs.db
 .pytest_cache/
 .coverage
 htmlcov/
+
+# Local runtime data
+backend/data/
+backend/chroma_db/
+*.sqlite
+*.sqlite3
+

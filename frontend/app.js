@@ -32,6 +32,8 @@ const dom = {
   btnMic:             $('btn-mic'),
   interimText:        $('interim-text'),
   btnEnd:             $('btn-end-interview'),
+  btnUploadResume:    $('btn-upload-resume'),
+  resumeFileInput:    $('resume-file'),
   progressSection:    $('progress-section'),
   progressFill:       $('progress-fill'),
   progressLabel:      $('progress-label'),
@@ -65,7 +67,10 @@ const state = {
   currentUtterance: null,
   recognition:      null,
   lastFeedback:     null,   // stored for copy-to-clipboard
+  backendHealthy:   false,
 };
+
+let backendHealthRetryTimer = null;
 
 // ── Session Initialisation ─────────────────────────────────────
 function initSession() {
@@ -90,6 +95,29 @@ function showToast(message, type = 'info', duration = 4000) {
     toast.style.opacity = '0';
     setTimeout(() => toast.remove(), 350);
   }, duration);
+}
+
+function setUploadButtonState(state) {
+  const button = dom.btnUploadResume;
+  if (!button) return;
+
+  switch (state) {
+    case 'uploading':
+      button.disabled = true;
+      button.textContent = 'Uploading…';
+      break;
+    case 'success':
+      button.disabled = true;
+      button.textContent = 'Uploaded';
+      break;
+    case 'error':
+      button.disabled = false;
+      button.textContent = 'Retry';
+      break;
+    default:
+      button.disabled = false;
+      button.textContent = 'Upload';
+  }
 }
 
 // ── Transcript Rendering ───────────────────────────────────────
@@ -161,14 +189,15 @@ const STAGE_LABELS = {
   'ROLE_SELECTION':          '🎯 Setup',
 };
 
-function updateProgress(qCount, maxQ, stage) {
+function updateProgress(qCount, maxQ, stage, difficulty) {
   const pct = maxQ > 0 ? Math.min(100, Math.round((qCount / maxQ) * 100)) : 0;
   dom.progressFill.style.width = `${pct}%`;
   dom.progressLabel.textContent = `Q ${qCount} / ${maxQ}`;
   dom.progressBar.setAttribute('aria-valuenow', pct);
 
   if (dom.stageLabel) {
-    const stageText = STAGE_LABELS[stage] || stage || '';
+    const difficultyText = difficulty ? ` · ${String(difficulty).toUpperCase()}` : '';
+    const stageText = (STAGE_LABELS[stage] || stage || '') + difficultyText;
     dom.stageLabel.textContent = stageText;
     dom.stageLabel.style.display = stageText ? 'inline-flex' : 'none';
   }
@@ -208,6 +237,54 @@ dom.btnClearTranscript.addEventListener('click', () => {
   });
   if (dom.transcriptEmpty) dom.transcriptEmpty.style.display = '';
 });
+
+async function uploadResume() {
+  const file = dom.resumeFileInput?.files?.[0];
+  if (!file) {
+    showToast('Please choose a PDF or DOCX resume first.', 'warning');
+    return;
+  }
+
+  if (!state.sessionId) initSession();
+
+  const formData = new FormData();
+  formData.append('file', file);
+  formData.append('session_id', state.sessionId);
+
+  setUploadButtonState('uploading');
+
+  try {
+    const response = await fetch(`${BACKEND_URL}/resume/upload`, {
+      method: 'POST',
+      body: formData,
+    });
+
+    const rawText = await response.text();
+    let data = {};
+    if (rawText) {
+      try {
+        data = JSON.parse(rawText);
+      } catch {
+        data = { message: rawText };
+      }
+    }
+
+    if (!response.ok) {
+      throw new Error(data.error || data.message || 'Resume upload failed');
+    }
+
+    const successMessage = data.message || `Resume uploaded${data.filename ? `: ${data.filename}` : ''}`;
+    showToast(successMessage, 'success');
+    setUploadButtonState('success');
+  } catch (err) {
+    showToast(err.message || 'Resume upload failed', 'error');
+    setUploadButtonState('error');
+  } finally {
+    setTimeout(() => setUploadButtonState('default'), 1500);
+  }
+}
+
+dom.btnUploadResume?.addEventListener('click', uploadResume);
 
 // ── Backend error banner ───────────────────────────────────────
 function showBackendError(msg) {
@@ -262,10 +339,10 @@ async function sendMessage(text) {
       const maxQ   = info.max_questions ?? 6;
       const stage  = info.interview_stage ?? '';
 
-      updateProgress(qCount, maxQ, stage);
+      updateProgress(qCount, maxQ, stage, info.difficulty);
 
       console.debug(
-        `[IPP] stage=${stage} | q=${qCount}/${maxQ} | ` +
+        `[IPP] stage=${stage} | q=${qCount}/${maxQ} | difficulty=${info.difficulty ?? 'medium'} | ` +
         `classification=${info.classification ?? 'N/A'} | ` +
         `next_node=${info.current_node ?? '???'}`
       );
@@ -603,19 +680,28 @@ document.addEventListener('keydown', (e) => {
 });
 
 // ── Health check on load ───────────────────────────────────────
-async function checkBackendHealth() {
-  try {
-    const res = await fetch(`${BACKEND_URL}/health`, { signal: AbortSignal.timeout(3000) });
-    if (res.ok) {
-      console.log('[IPP] Backend healthy ✓');
-      hideBackendError();
-    } else {
-      showBackendError('Backend responded with an error — check the Flask server.');
+async function checkBackendHealth(retries = 3, delayMs = 1000) {
+  const message =
+    'Cannot reach the backend. Make sure the Flask server is running on port 5000 (python app.py).';
+
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const res = await fetch(`${BACKEND_URL}/health`, { signal: AbortSignal.timeout(3000) });
+      if (res.ok) {
+        console.log('[IPP] Backend healthy ✓');
+        state.backendHealthy = true;
+        hideBackendError();
+        return true;
+      }
+      throw new Error('Backend responded with non-OK status');
+    } catch (err) {
+      state.backendHealthy = false;
+      if (attempt === retries) {
+        showBackendError(message);
+        return false;
+      }
+      await delay(delayMs);
     }
-  } catch {
-    showBackendError(
-      'Cannot reach the backend. Make sure the Flask server is running on port 5000 (python app.py).'
-    );
   }
 }
 
@@ -635,7 +721,17 @@ function init() {
     );
   }, 300);
 
-  checkBackendHealth();
+  checkBackendHealth().then((healthy) => {
+    if (!healthy) {
+      backendHealthRetryTimer = setInterval(async () => {
+        const ok = await checkBackendHealth(0);
+        if (ok && backendHealthRetryTimer) {
+          clearInterval(backendHealthRetryTimer);
+          backendHealthRetryTimer = null;
+        }
+      }, 3000);
+    }
+  });
 }
 
 document.addEventListener('DOMContentLoaded', init);

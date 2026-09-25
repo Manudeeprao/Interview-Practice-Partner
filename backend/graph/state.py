@@ -3,7 +3,7 @@ LangGraph State Schema for the Interview Practice Partner.
 Defines the InterviewState TypedDict that flows through all graph nodes.
 """
 
-from typing import TypedDict, Optional, List, Literal
+from typing import List, Literal, Optional, TypedDict
 
 
 class Message(TypedDict):
@@ -19,39 +19,13 @@ class FeedbackData(TypedDict):
     improvementAreas: List[str]
 
 
+DifficultyLevel = Literal["easy", "medium", "hard"]
+AnswerStrength = Literal["weak", "adequate", "strong"]
+
+
 class InterviewState(TypedDict):
     """
     Central state object passed between all LangGraph nodes.
-
-    Fields:
-        session_id            — Unique session identifier
-        role                  — The job role being interviewed for
-        role_confirmed        — Whether the role has been extracted and confirmed
-
-        -- Counters --
-        main_question_count   — Number of main interview questions completed
-        follow_up_count       — Number of follow-up probes asked (does NOT affect main count)
-        is_follow_up          — True when the current exchange is a follow-up probe
-        max_questions         — Target number of main questions (5-7, randomized)
-
-        -- Interview progression (prevents repeated questions) --
-        interview_stage       — Current stage: introduction/project_discussion/technical_fundamentals/system_design/behavioral
-        previous_questions    — List of ALL main questions asked so far (verbatim)
-        user_answers          — List of ALL user answers given so far (verbatim)
-
-        -- Current turn --
-        current_question      — The last question the agent asked
-        history               — Full conversation history
-        last_user_message     — Most recent user input
-        classification        — Last classifier result
-        classification_reason — One-line reason from classifier
-        agent_response        — Text response to send to the frontend
-        next_node             — Internal routing hint
-
-        -- End state --
-        feedback              — Structured feedback dict
-        done                  — True when interview ended and feedback ready
-        error                 — Optional error message
     """
     session_id: str
     role: Optional[str]
@@ -71,10 +45,61 @@ class InterviewState(TypedDict):
     last_user_message: str
     classification: Optional[Literal["VAGUE", "GOOD", "OFF_TOPIC", "OUT_OF_SCOPE"]]
     classification_reason: Optional[str]
+    answer_strength: Optional[AnswerStrength]
+    difficulty: DifficultyLevel
+    consecutive_strong_answers: int
+    consecutive_weak_answers: int
     agent_response: Optional[str]
     next_node: Optional[str]
-    project_question_count: int  # Tracks how many project-related questions have been asked (max 2)
+    question_generation_failed: bool
+    ready_for_feedback: bool
+    project_question_count: int
 
     feedback: Optional[FeedbackData]
     done: bool
     error: Optional[str]
+    resume_uploaded: bool
+    resume_filename: Optional[str]
+    resume_chunk_count: int
+
+
+STAGE_ROLE_SELECTION = "ROLE_SELECTION"
+STAGE_INTERVIEW_ACTIVE = "INTERVIEW_ACTIVE"
+STAGE_FEEDBACK = "FEEDBACK_GENERATION"
+STAGE_COMPLETE = "INTERVIEW_COMPLETE"
+
+
+def create_initial_state(session_id: str) -> dict:
+    """Create a fresh InterviewState for a new session."""
+    return {
+        "session_id": session_id,
+        "role": None,
+        "role_confirmed": False,
+        "main_question_count": 0,
+        "follow_up_count": 0,
+        "is_follow_up": False,
+        "max_questions": 7,
+        "interview_stage": STAGE_ROLE_SELECTION,
+        "previous_questions": [],
+        "user_answers": [],
+        "current_question": None,
+        "history": [],
+        "last_user_message": "",
+        "classification": None,
+        "classification_reason": None,
+        "answer_strength": None,
+        "difficulty": "medium",
+        "consecutive_strong_answers": 0,
+        "consecutive_weak_answers": 0,
+        "agent_response": None,
+        "next_node": "role_intake_node",
+        "question_generation_failed": False,
+        "ready_for_feedback": False,
+        "project_question_count": 0,
+        "feedback": None,
+        "done": False,
+        "error": None,
+        "resume_uploaded": False,
+        "resume_filename": None,
+        "resume_chunk_count": 0,
+    }

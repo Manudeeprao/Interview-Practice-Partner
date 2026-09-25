@@ -6,7 +6,7 @@ An AI-powered mock interview coach that conducts adaptive, role-specific intervi
 
 ## Architecture
 
-The backend is a stateful LangGraph-style node graph manually dispatched per conversation turn. Each node is a pure function `(InterviewState) → dict` whose return value is merged into shared session state.
+The backend is a compiled LangGraph `StateGraph`. Flask persists `InterviewState` as JSON in SQLite and resumes the graph checkpoint on each `/chat` turn. Strong answers raise difficulty; weak or vague answers trigger a clarification and lower difficulty.
 
 ```
 START
@@ -46,7 +46,7 @@ generate_feedback_node    ← Analyses the full transcript with a separate LLM c
                             strengths, improvementAreas.
 ```
 
-**Stage-aware guards:** `run_turn` in `app.py` checks `role_confirmed` before every dispatch. If it is `True`, `role_intake_node` is permanently blocked — answering a question that happens to mention a role name cannot restart the interview.
+**Stage-aware guards:** once `role_confirmed` is true, the compiled graph enters at `classify_answer_node` instead of role intake.
 
 ---
 
@@ -97,8 +97,8 @@ Open `frontend/index.html` in Chrome or Edge (double-click, or serve with any st
 ### Why a node graph instead of a single prompt?
 A single mega-prompt that must handle role intake, question generation, answer classification, follow-ups, redirects, and feedback all at once becomes brittle and hard to debug. The node graph makes each responsibility explicit and independently testable. When a bug appears (e.g., role re-detection mid-interview), the exact node responsible is immediately obvious from the logs.
 
-### Why LangGraph-style dispatch?
-The interview is interactive — it pauses between turns for user input. A full `graph.invoke()` run that tries to complete end-to-end in one call doesn't fit this model. The manual dispatcher in `run_turn` runs nodes sequentially within a turn until it has a response ready, then pauses. This is simpler, more predictable, and easier to add stage guards to.
+### Why a compiled LangGraph?
+The interview is interactive — it pauses between turns for user input. The compiled graph uses `interrupt_before` on the nodes that need the next candidate message, then Flask resumes the same SQLite checkpoint. Routing is done with conditional edges (GOOD / VAGUE / OFF_TOPIC / OUT_OF_SCOPE), not a Flask if/else dispatcher.
 
 ### Why Groq?
 Groq's inference speed is significantly faster than most providers, which matters for a real-time interview UX. The free tier is reliable for development and demos. The `groq` Python SDK is also straightforward — no LangChain wrapper needed.
@@ -113,7 +113,14 @@ Voice is a nice-to-have enhancement, not a requirement. The text input is always
 
 ## Testing
 
-See [TESTING.md](./TESTING.md) for the full manual persona test results.
+From the repo root:
+
+```bash
+pip install -r backend/requirements.txt
+pytest
+```
+
+Automated coverage includes role extraction, answer routing, stop-signal handling, stage transitions, SQLite session persistence, resume isolation, compiled-graph execution, and Flask API endpoints.
 
 ---
 
@@ -122,5 +129,5 @@ See [TESTING.md](./TESTING.md) for the full manual persona test results.
 - **STT quality:** Browser Speech Recognition works best in Chrome on a desktop. Mobile Chrome is variable; Firefox is not supported.
 - **Feedback depth:** Feedback quality scales with transcript length. Short sessions (< 3 questions) produce generic feedback — this is why the app enforces a minimum of 3 answered questions before stopping.
 - **Role topic coverage:** The role-topic validator only covers ~10 common roles. Niche or unusual roles (e.g. "Radiological Technician") fall back to generic professional topics.
-- **State is in-memory:** The backend stores session state in a Python dict. Restarting the server clears all sessions. For a production deployment, replace with Redis or a database.
+- **State is SQLite-backed:** interview JSON and LangGraph checkpoints survive backend restarts. For a larger production deployment, Redis or PostgreSQL can still replace the local files.
 - **LLM non-determinism:** Even with role anchoring, occasional question drift is possible. The validator catches and retries most cases; persistent drift would require a more constrained few-shot prompt.

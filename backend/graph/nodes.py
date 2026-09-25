@@ -21,8 +21,9 @@ Interview stages (7 questions total):
 import logging
 import random
 import re
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
+from rag.retriever import ResumeRetriever
 from .state import InterviewState
 from .llm import chat_completion, structured_completion
 from .prompts import (
@@ -34,10 +35,12 @@ from .prompts import (
     DECLINE_SYSTEM_PROMPT,
     ROLE_VALIDATOR_PROMPT,
     get_interviewer_system_prompt,
+    get_difficulty_guidance,
     _get_role_topics,
 )
 
 logger = logging.getLogger(__name__)
+resume_retriever = ResumeRetriever()
 
 # -- Stop signal detection -------------------------------------------------
 # IMPORTANT: We must NOT use substring matching. Words like "done", "finish",
@@ -127,6 +130,36 @@ def _extract_role_from_text(text: str) -> str | None:
                 return candidate.title()
     return None
 
+
+DIFFICULTY_LEVELS = ("easy", "medium", "hard")
+
+
+def adjust_difficulty(current: str, classification: str, strength: Optional[str] = None) -> str:
+    """Move interview difficulty up after strong answers and down after weak ones."""
+    level = current if current in DIFFICULTY_LEVELS else "medium"
+    index = DIFFICULTY_LEVELS.index(level)
+    normalized_strength = (strength or "").lower()
+
+    if classification == "GOOD" and normalized_strength == "strong":
+        return DIFFICULTY_LEVELS[min(index + 1, len(DIFFICULTY_LEVELS) - 1)]
+    if classification == "VAGUE" or normalized_strength == "weak":
+        return DIFFICULTY_LEVELS[max(index - 1, 0)]
+    return level
+
+
+def _infer_strength(classification: str, provided: Optional[str], answer: str) -> str:
+    valid = {"weak", "adequate", "strong"}
+    if provided and provided.lower() in valid:
+        return provided.lower()
+    if classification == "VAGUE":
+        return "weak"
+    if classification in {"OFF_TOPIC", "OUT_OF_SCOPE"}:
+        return "weak"
+    if classification == "GOOD" and len(answer.strip()) > 280:
+        return "strong"
+    return "adequate"
+
+
 # ---------------------------------------------------------------------------
 # Role consistency validator
 # ---------------------------------------------------------------------------
@@ -200,6 +233,8 @@ def role_intake_node(state: InterviewState) -> Dict[str, Any]:
             "interview_stage": "INTERVIEW_ACTIVE",
             "agent_response": response,
             "history": new_history,
+            "question_generation_failed": False,
+            "ready_for_feedback": False,
             "next_node": "ask_question_node",
         }
     else:
@@ -255,15 +290,25 @@ def ask_question_node(state: InterviewState) -> Dict[str, Any]:
     """
     role = state.get("role", "General")
     history = state.get("history", [])
+    session_id = state.get("session_id")
     main_question_count = state.get("main_question_count", 0)
     max_questions = state.get("max_questions", 6)
     previous_questions = state.get("previous_questions", [])
+    resume_chunks = []
+    if session_id and state.get("resume_uploaded"):
+        resume_chunks = resume_retriever.retrieve_context(
+            session_id=session_id,
+            role=role,
+            history=history,
+            top_k=5,
+        )
     user_answers = state.get("user_answers", [])
 
     # Compute the current interview stage
     stage = _compute_stage(main_question_count, max_questions)
     project_question_count = state.get("project_question_count", 0)
-    system_prompt = get_interviewer_system_prompt(role, stage=stage)
+    difficulty = state.get("difficulty", "medium")
+    system_prompt = get_interviewer_system_prompt(role, stage=stage, difficulty=difficulty)
 
     # Build stage-specific instruction
     if main_question_count == 0:
@@ -271,14 +316,15 @@ def ask_question_node(state: InterviewState) -> Dict[str, Any]:
             f"This is the FIRST question of the {role} interview. "
             f"Stage: {stage.upper()}. "
             f"Briefly introduce yourself as the interviewer, then ask a warm-up question "
-            f"about the candidate's background or interest in the {role} role."
+            f"asking the candidate to introduce themselves and mention the most relevant internship, project, "
+            f"or certification from their resume for the {role} role."
         )
     elif stage == "project_discussion":
         instruction = (
             f"This is question #{main_question_count + 1} of {max_questions}. "
-            f"Stage: PROJECT DISCUSSION (asking about the candidate's own project). "
-            f"Ask a focused question about the candidate's project work or experience. "
-            f"Focus on challenges, technical decisions, or lessons learned."
+            f"Stage: PROJECT DISCUSSION (asking about the candidate's resume experiences). "
+            f"Ask a focused question about one of the candidate's resume projects, internships, or certifications. "
+            f"Focus on technical decisions, challenges faced, measurable outcomes, and lessons learned."
         )
     elif stage == "technical_fundamentals":
         instruction = (
@@ -312,6 +358,8 @@ def ask_question_node(state: InterviewState) -> Dict[str, Any]:
             f"Ask the next {role} interview question."
         )
 
+    instruction += f"\n\n{get_difficulty_guidance(difficulty)}"
+
     # CRITICAL: Tell the LLM exactly which questions were already asked
     if previous_questions:
         questions_list = "\n".join(
@@ -329,6 +377,14 @@ def ask_question_node(state: InterviewState) -> Dict[str, Any]:
         instruction += (
             f"\n\nCandidate's last answer (use for context ONLY — "
             f"your question must still be about {role} skills): \"{last_answer}\""
+        )
+
+    if resume_chunks:
+        context_block = "\n".join(f"- {chunk}" for chunk in resume_chunks)
+        instruction += (
+            f"\n\nResume Context:\n{context_block}\n\n"
+            f"Priority: ask about the candidate's resume projects, internships, or certifications when possible. "
+            f"If the resume contains relevant details, reference them in the question or use them to narrow the focus."
         )
 
     # Generate question, then validate role alignment. Retry once with a
@@ -353,6 +409,7 @@ def ask_question_node(state: InterviewState) -> Dict[str, Any]:
             return {
                 "agent_response": error_msg,
                 "history": new_history,
+                "question_generation_failed": True,
                 "next_node": "ask_question_node",
             }
 
@@ -395,8 +452,8 @@ def ask_question_node(state: InterviewState) -> Dict[str, Any]:
         updated_project_count += 1
 
     logger.info(
-        "[ASK] Stage=%s | Role=%s | Q=%d/%d | project_q=%d | prev_count=%d | q='%s'",
-        stage, role, main_question_count, max_questions,
+        "[ASK] Stage=%s | Role=%s | Difficulty=%s | Q=%d/%d | project_q=%d | prev_count=%d | q='%s'",
+        stage, role, difficulty, main_question_count, max_questions,
         updated_project_count, len(updated_previous), question[:80],
     )
 
@@ -408,6 +465,7 @@ def ask_question_node(state: InterviewState) -> Dict[str, Any]:
         "interview_stage": stage,
         "previous_questions": updated_previous,
         "project_question_count": updated_project_count,
+        "question_generation_failed": False,
         "next_node": "classify_answer_node",
     }
 
@@ -438,6 +496,7 @@ def classify_answer_node(state: InterviewState) -> Dict[str, Any]:
         return {
             "classification": "GOOD",
             "classification_reason": "User requested to end the interview",
+            "answer_strength": "adequate",
             "history": updated_history,
             "user_answers": updated_answers,
             "next_node": "next_question_node",
@@ -461,17 +520,38 @@ def classify_answer_node(state: InterviewState) -> Dict[str, Any]:
         classification = result.get("classification", "").upper()
         reason = result.get("reason", "")
         if classification in valid_classifications:
+            strength = _infer_strength(classification, result.get("strength"), user_msg)
+            difficulty = adjust_difficulty(
+                state.get("difficulty", "medium"),
+                classification,
+                strength,
+            )
+            strong_streak = state.get("consecutive_strong_answers", 0)
+            weak_streak = state.get("consecutive_weak_answers", 0)
+            if strength == "strong" and classification == "GOOD":
+                strong_streak += 1
+                weak_streak = 0
+            elif classification == "VAGUE" or strength == "weak":
+                weak_streak += 1
+                strong_streak = 0
+            else:
+                strong_streak = 0
+                weak_streak = 0
+
             logger.info(
-                ">>> classify_answer_node: %s -- %s (stage=%s, main_q=%d, is_follow_up=%s)",
-                classification, reason,
+                ">>> classify_answer_node: %s/%s -- %s (stage=%s, main_q=%d, difficulty=%s, is_follow_up=%s)",
+                classification, strength, reason,
                 state.get("interview_stage", "?"),
                 state.get("main_question_count", 0),
+                difficulty,
                 state.get("is_follow_up", False),
             )
-            # For OFF_TOPIC and OUT_OF_SCOPE, the user hasn't answered the question
-            # yet — reset is_follow_up so a stale True flag from a prior follow-up
-            # exchange doesn't leak into redirect_node / decline_node paths.
-            extra = {}
+            extra = {
+                "answer_strength": strength,
+                "difficulty": difficulty,
+                "consecutive_strong_answers": strong_streak,
+                "consecutive_weak_answers": weak_streak,
+            }
             if classification in ("OFF_TOPIC", "OUT_OF_SCOPE"):
                 extra["is_follow_up"] = False
             return {
@@ -521,12 +601,30 @@ def follow_up_node(state: InterviewState) -> Dict[str, Any]:
     user_msg = state["last_user_message"]
     current_question = state.get("current_question", "your last answer")
     follow_up_count = state.get("follow_up_count", 0) + 1
+    session_id = state.get("session_id")
+    role = state.get("role", "General")
+    resume_chunks = []
+    if session_id and state.get("resume_uploaded"):
+        resume_chunks = resume_retriever.retrieve_context(
+            session_id=session_id,
+            role=role,
+            history=history,
+            top_k=3,
+        )
 
     instruction = (
         f"The candidate just gave this vague answer to the question '{current_question}': "
         f"'{user_msg}'. Ask a specific follow-up question to probe for more detail. "
         f"Reference what they said and ask for a concrete example or measurable outcome."
     )
+
+    if resume_chunks:
+        context_block = "\n".join(f"- {chunk}" for chunk in resume_chunks)
+        instruction += (
+            f"\n\nResume Context:\n{context_block}\n\n"
+            f"If possible, make the follow-up question connect to the candidate's resume experience, "
+            f"especially their projects, internships, or certifications."
+        )
 
     follow_up = chat_completion(
         system_prompt=FOLLOW_UP_SYSTEM_PROMPT,
@@ -787,6 +885,7 @@ def generate_feedback_node(state: InterviewState) -> Dict[str, Any]:
     """
     history = state.get("history", [])
     role = state.get("role", "General")
+    session_id = state.get("session_id")
     main_question_count = state.get("main_question_count", 0)
 
     # Build readable transcript from history
@@ -796,6 +895,15 @@ def generate_feedback_node(state: InterviewState) -> Dict[str, Any]:
         transcript_lines.append(f"{prefix}: {msg['content']}")
     transcript = "\n\n".join(transcript_lines)
 
+    resume_context = []
+    if session_id and state.get("resume_uploaded"):
+        resume_context = resume_retriever.retrieve_context(
+            session_id=session_id,
+            role=role,
+            history=history,
+            top_k=5,
+        )
+
     prompt_content = (
         f"INTERVIEW ROLE: {role}\n"
         f"TOTAL MAIN QUESTIONS ANSWERED: {main_question_count}\n\n"
@@ -803,8 +911,12 @@ def generate_feedback_node(state: InterviewState) -> Dict[str, Any]:
         f"Reference the actual role when evaluating technical knowledge and skills. "
         f"Title your overallImpression as '{role} Interview Feedback'.\n\n"
         f"Full Interview Transcript:\n{transcript}\n\n"
-        f"Please provide structured feedback on this {role} interview performance."
     )
+    if resume_context:
+        prompt_content += (
+            "Resume Context:\n" + "\n".join(f"- {chunk}" for chunk in resume_context) + "\n\n"
+        )
+    prompt_content += "Please provide structured feedback on this interview performance."
 
     logger.info(
         "[FEEDBACK] Generating %s Interview Feedback | Q=%d | transcript_len=%d chars",

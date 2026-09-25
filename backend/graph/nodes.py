@@ -574,6 +574,10 @@ def classify_answer_node(state: InterviewState) -> Dict[str, Any]:
             "Could not classify the answer due to a temporary system issue; "
             "asking for more detail."
         ),
+        "answer_strength": "weak",
+        "difficulty": adjust_difficulty(state.get("difficulty", "medium"), "VAGUE", "weak"),
+        "consecutive_strong_answers": 0,
+        "consecutive_weak_answers": state.get("consecutive_weak_answers", 0) + 1,
         "history": updated_history,
         "user_answers": updated_answers,
         "next_node": "follow_up_node",
@@ -615,7 +619,8 @@ def follow_up_node(state: InterviewState) -> Dict[str, Any]:
     instruction = (
         f"The candidate just gave this vague answer to the question '{current_question}': "
         f"'{user_msg}'. Ask a specific follow-up question to probe for more detail. "
-        f"Reference what they said and ask for a concrete example or measurable outcome."
+        f"Reference what they said and ask for a concrete example or measurable outcome. "
+        f"Current difficulty is {state.get('difficulty', 'medium')}; if easy, keep the probe simpler."
     )
 
     if resume_chunks:
@@ -736,6 +741,7 @@ def next_question_node(state: InterviewState) -> Dict[str, Any]:
             "interview_stage": next_stage,
             "history": new_history,
             "agent_response": nudge_msg,
+            "ready_for_feedback": False,
             "next_node": "ask_question_node",
         }
 
@@ -758,6 +764,7 @@ def next_question_node(state: InterviewState) -> Dict[str, Any]:
             "interview_stage": "feedback",
             "history": new_history,
             "agent_response": transition_msg,
+            "ready_for_feedback": True,
             "next_node": "generate_feedback_node",
         }
     else:
@@ -777,6 +784,7 @@ def next_question_node(state: InterviewState) -> Dict[str, Any]:
             "interview_stage": next_stage,
             "history": new_history,
             "agent_response": ack,
+            "ready_for_feedback": False,
             "next_node": "ask_question_node",
         }
 
@@ -976,5 +984,6 @@ def generate_feedback_node(state: InterviewState) -> Dict[str, Any]:
         "done": True,
         "interview_stage": "INTERVIEW_COMPLETE",
         "agent_response": done_message,
+        "ready_for_feedback": False,
         "next_node": "__end__",
     }

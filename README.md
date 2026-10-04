@@ -1,133 +1,161 @@
 # Interview Practice Partner
 
-An AI-powered mock interview coach that conducts adaptive, role-specific interviews via voice or text and delivers structured performance feedback. Built with a LangGraph agent graph, a Groq LLM backend, and a vanilla-JS frontend with browser-native speech I/O — no external STT/TTS services required.
+An AI mock interview app that runs a role-based interview, adapts question difficulty based on answers, and uses a candidate resume to personalize follow-up questions.
 
----
+## What it does
 
-## Architecture
+- interviews the user in a role-specific workflow
+- stores session state in SQLite between requests
+- resumes the same compiled LangGraph graph for each session
+- classifies answers as GOOD, VAGUE, OFF_TOPIC, or OUT_OF_SCOPE
+- raises or lowers difficulty depending on answer quality
+- accepts resume uploads in PDF and DOCX format
+- retrieves resume context with ChromaDB + embeddings
+- generates end-of-interview feedback
+- supports browser microphone input and text input
 
-The backend is a compiled LangGraph `StateGraph`. Flask persists `InterviewState` as JSON in SQLite and resumes the graph checkpoint on each `/chat` turn. Strong answers raise difficulty; weak or vague answers trigger a clarification and lower difficulty.
+## Tech stack
 
+- Python + Flask
+- LangGraph compiled StateGraph
+- SQLite session persistence and checkpoints
+- Groq LLM API
+- ChromaDB + sentence-transformers for resume retrieval
+- Vanilla JavaScript frontend
+
+## Project structure
+
+```text
+interview_practice_partner/
+├── backend/
+│   ├── app.py
+│   ├── requirements.txt
+│   ├── chroma_db/
+│   ├── graph/
+│   │   ├── graph.py
+│   │   ├── llm.py
+│   │   ├── nodes.py
+│   │   ├── prompts.py
+│   │   └── state.py
+│   ├── rag/
+│   │   ├── chunker.py
+│   │   ├── embeddings.py
+│   │   ├── extractor.py
+│   │   ├── retriever.py
+│   │   └── vector_store.py
+│   ├── tests/
+│   └── storage.py
+├── frontend/
+│   ├── app.js
+│   ├── index.html
+│   └── style.css
+├── README.md
+├── PROJECT_EXPLANATION.md
+└── venv/
 ```
-START
-  │
-  ▼
-role_intake_node          ← Extracts / confirms the target role from user input.
-                            Sets role_confirmed=True. NEVER called again after this.
-  │
-  ▼
-ask_question_node         ← Generates the next interview question.
-                            Stage-aware (intro → behavioral → technical → advanced).
-                            Validates every question against the selected role;
-                            retries with a stricter prompt if role drift is detected.
-  │
-  ▼
-classify_answer_node      ← Classifies the user's answer:
-  │                         GOOD / VAGUE / OFF_TOPIC / OUT_OF_SCOPE
-  ├─ GOOD ──────────────▶ next_question_node
-  │                         Increments main_question_count (always, even after follow-up).
-  │                         Enforces a minimum of 3 answered questions before stop signals
-  │                         are honoured. Routes to generate_feedback_node when complete.
-  │
-  ├─ VAGUE ─────────────▶ follow_up_node
-  │                         Asks a focused follow-up question. Sets is_follow_up=True.
-  │                         Routes back to classify_answer_node.
-  │
-  ├─ OFF_TOPIC ─────────▶ redirect_node
-  │                         Politely redirects the candidate back to the question.
-  │
-  └─ OUT_OF_SCOPE ──────▶ decline_node
-                            Stays in character, declines inappropriate requests,
-                            redirects back to the interview.
 
-generate_feedback_node    ← Analyses the full transcript with a separate LLM call.
-                            Returns structured JSON: readinessScore (1-10),
-                            overallImpression, communication, technicalKnowledge,
-                            strengths, improvementAreas.
-```
+## Quick start
 
-**Stage-aware guards:** once `role_confirmed` is true, the compiled graph enters at `classify_answer_node` instead of role intake.
+### 1) Create and activate a virtual environment
 
----
-
-## Setup
-
-### Prerequisites
-- Python 3.10+
-- A free [Groq API key](https://console.groq.com/) (model: `claude-sonnet-4-5` or equivalent)
-- Chrome/Edge for voice input (browser Web Speech API)
-
-### 1. Clone and create the virtual environment
-```bash
-git clone https://github.com/YOUR_USERNAME/interview_practice_partner.git
-cd interview_practice_partner
+```powershell
+cd C:\Users\jupal\OneDrive\Desktop\interview_practice_partner
 python -m venv venv
-# Windows
-venv\Scripts\activate
-# macOS / Linux
-source venv/bin/activate
+.\venv\Scripts\Activate.ps1
 ```
 
-### 2. Install dependencies
-```bash
-pip install -r backend/requirements.txt
+### 2) Install backend dependencies
+
+```powershell
+pip install -r backend\requirements.txt
 ```
 
-### 3. Configure environment
-```bash
-cp .env.example .env
-# Edit .env and add your Groq API key:
-# GROQ_API_KEY=gsk_...
+### 3) Add the Groq API key
+
+Create a `.env` file in the project root or inside `backend/` with:
+
+```env
+GROQ_API_KEY=your_key_here
+GROQ_MODEL=openai/gpt-oss-20b
 ```
 
-### 4. Run the backend
-```bash
+> The app reads from environment variables at runtime. The default model is configurable via `GROQ_MODEL`.
+
+### 4) Start the backend
+
+```powershell
 cd backend
 python app.py
-# Backend runs on http://localhost:5000
 ```
 
-### 5. Open the frontend
-Open `frontend/index.html` in Chrome or Edge (double-click, or serve with any static file server).
+The backend runs on:
 
----
+```text
+http://localhost:5000
+```
 
-## Design Decisions
+### 5) Start the frontend
 
-### Why a node graph instead of a single prompt?
-A single mega-prompt that must handle role intake, question generation, answer classification, follow-ups, redirects, and feedback all at once becomes brittle and hard to debug. The node graph makes each responsibility explicit and independently testable. When a bug appears (e.g., role re-detection mid-interview), the exact node responsible is immediately obvious from the logs.
+In a separate terminal:
 
-### Why a compiled LangGraph?
-The interview is interactive — it pauses between turns for user input. The compiled graph uses `interrupt_before` on the nodes that need the next candidate message, then Flask resumes the same SQLite checkpoint. Routing is done with conditional edges (GOOD / VAGUE / OFF_TOPIC / OUT_OF_SCOPE), not a Flask if/else dispatcher.
+```powershell
+cd frontend
+python -m http.server 8000
+```
 
-### Why Groq?
-Groq's inference speed is significantly faster than most providers, which matters for a real-time interview UX. The free tier is reliable for development and demos. The `groq` Python SDK is also straightforward — no LangChain wrapper needed.
+Then open:
 
-### Why browser-native voice APIs?
-The Web Speech API (SpeechRecognition + SpeechSynthesis) requires zero server infrastructure and zero API cost. For a demo-grade project it is the right trade-off: it works instantly in Chrome/Edge with a single permission prompt. The downside (Chrome-only, quality varies) is documented in Known Limitations.
+```text
+http://localhost:8000
+```
 
-### Why text input is always the primary input
-Voice is a nice-to-have enhancement, not a requirement. The text input is always visible, always enabled, and is the fallback if the browser denies microphone access or if the user is in a noisy environment. This prevents the app from being unusable in incognito mode or on Firefox.
+## Runtime behavior
 
----
+- A new session is created automatically when the frontend first loads.
+- Resume uploads are attached to that session ID.
+- Each chat request resumes the same compiled graph thread for that session.
+- The graph routes responses through conditional logic instead of a manual Flask dispatcher.
+- The app persists the state so the interview can continue across requests.
+
+## Resume-aware interviewing
+
+The app supports PDF and DOCX resume uploads. Once uploaded:
+
+- the resume text is extracted
+- it is chunked and embedded
+- the chunks are stored per session in ChromaDB
+- the retriever is used to ground interview questions and follow-ups in the uploaded resume
+
+This keeps questions more relevant to the candidate's actual background.
 
 ## Testing
 
-From the repo root:
+Run the backend test suite from the repository root:
 
-```bash
-pip install -r backend/requirements.txt
+```powershell
 pytest
 ```
 
-Automated coverage includes role extraction, answer routing, stop-signal handling, stage transitions, SQLite session persistence, resume isolation, compiled-graph execution, and Flask API endpoints.
+## Notes
 
----
+- The frontend can use browser speech recognition if the browser allows microphone access.
+- Text input remains available as the fallback path.
+- Only PDF and DOCX resume formats are supported for upload.
+- The app is designed for local development and demos; production deployment would still need hosting, environment management, and auth/security hardening.
 
-## Known Limitations
+## Troubleshooting
 
-- **STT quality:** Browser Speech Recognition works best in Chrome on a desktop. Mobile Chrome is variable; Firefox is not supported.
-- **Feedback depth:** Feedback quality scales with transcript length. Short sessions (< 3 questions) produce generic feedback — this is why the app enforces a minimum of 3 answered questions before stopping.
-- **Role topic coverage:** The role-topic validator only covers ~10 common roles. Niche or unusual roles (e.g. "Radiological Technician") fall back to generic professional topics.
-- **State is SQLite-backed:** interview JSON and LangGraph checkpoints survive backend restarts. For a larger production deployment, Redis or PostgreSQL can still replace the local files.
-- **LLM non-determinism:** Even with role anchoring, occasional question drift is possible. The validator catches and retries most cases; persistent drift would require a more constrained few-shot prompt.
+If the backend cannot start:
+
+- verify `GROQ_API_KEY` is defined
+- make sure all Python dependencies were installed
+- ensure no other process is already using port 5000
+
+If the frontend cannot load:
+
+- confirm the static server is running on port 8000
+- check that the backend is reachable at `http://localhost:5000/health`
+
+## Additional reference
+
+For the deeper architecture and design notes, see [PROJECT_EXPLANATION.md](PROJECT_EXPLANATION.md).

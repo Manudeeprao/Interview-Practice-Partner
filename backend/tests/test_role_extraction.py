@@ -1,1 +1,51 @@
-ZnJvbSBncmFwaC5ub2RlcyBpbXBvcnQgX2V4dHJhY3Rfcm9sZV9mcm9tX3RleHQKCgpkZWYgdGVzdF9leHRyYWN0c19jb21tb25fc29mdHdhcmVfcm9sZSgpOgogICAgYXNzZXJ0IF9leHRyYWN0X3JvbGVfZnJvbV90ZXh0KCJJIHdhbnQgdG8gcHJhY3RpY2UgZm9yIGEgc29mdHdhcmUgZW5naW5lZXIgcm9sZSIpID09ICJTb2Z0d2FyZSBFbmdpbmVlciIKCgpkZWYgdGVzdF9leHRyYWN0c19kYXRhX3NjaWVudGlzdCgpOgogICAgYXNzZXJ0IF9leHRyYWN0X3JvbGVfZnJvbV90ZXh0KCJQbGVhc2UgaW50ZXJ2aWV3IG1lIGFzIGEgZGF0YSBzY2llbnRpc3QiKSA9PSAiRGF0YSBTY2llbnRpc3QiCgoKZGVmIHRlc3RfZXh0cmFjdHNfcm9sZV9mcm9tX2FwcGx5X3BhdHRlcm4oKToKICAgIHJvbGUgPSBfZXh0cmFjdF9yb2xlX2Zyb21fdGV4dCgiSSBhbSBhcHBseWluZyBmb3IgcHJvZHVjdCBkZXNpZ25lciIpCiAgICBhc3NlcnQgcm9sZSBpcyBub3QgTm9uZQogICAgYXNzZXJ0ICJwcm9kdWN0IiBpbiByb2xlLmxvd2VyKCkKCgpkZWYgdGVzdF9yZXR1cm5zX25vbmVfd2hlbl9yb2xlX2lzX3VuY2xlYXIoKToKICAgIGFzc2VydCBfZXh0cmFjdF9yb2xlX2Zyb21fdGV4dCgiaGVsbG8gdGhlcmUiKSBpcyBOb25lCgoKIyAtLS0gUmVncmVzc2lvbiB0ZXN0czogbGl2ZSBlbmQtdG8tZW5kIHJ1biAyMDI2LTEwLTA0IC0tLS0tLS0tLS0tLS0tLS0tLS0tLQpkZWYgdGVzdF9leHRyYWN0c19iYWNrZW5kX2VuZ2luZWVyX2JhcmUoKToKICAgICMgVGhlIG1vc3QgbmF0dXJhbCBzaW5nbGUtcGhyYXNlIGlucHV0IG11c3Qgbm90IGZhbGwgdGhyb3VnaCB0byB0aGUgTExNLgogICAgYXNzZXJ0IF9leHRyYWN0X3JvbGVfZnJvbV90ZXh0KCJiYWNrZW5kIGVuZ2luZWVyIikgPT0gIkJhY2tlbmQgRW5naW5lZXIiCgoKZGVmIHRlc3RfZXh0cmFjdHNfZnJvbnRlbmRfZW5naW5lZXJfYmFyZSgpOgogICAgYXNzZXJ0IF9leHRyYWN0X3JvbGVfZnJvbV90ZXh0KCJmcm9udGVuZCBlbmdpbmVlciIpID09ICJGcm9udGVuZCBFbmdpbmVlciIKCgpkZWYgdGVzdF9zdHJpcHNfbGVhZGluZ19hcnRpY2xlKCk6CiAgICBhc3NlcnQgX2V4dHJhY3Rfcm9sZV9mcm9tX3RleHQoIkkgd2FudCB0byBpbnRlcnZpZXcgZm9yIHRoZSBiYWNrZW5kIGVuZ2luZWVyIHJvbGUiKSA9PSAiQmFja2VuZCBFbmdpbmVlciIKCgpkZWYgdGVzdF9sb25nX2Fuc3dlcl90ZXh0X2RvZXNfbm90X3lpZWxkX2JvZ3VzX3JvbGUoKToKICAgICMgIlJlZGlzIGZvciBjYWNoaW5nIGhvdCBwcm9kdWN0IGRhdGEiIG11c3QgTk9UIGJlY29tZSAiQ2FjaGluZyBIb3QgUHJvZHVjdCBEYXRhIi4KICAgIGFuc3dlciA9ICgKICAgICAgICAiSSB3b3VsZCB1c2UgYSBsYXllcmVkIGFyY2hpdGVjdHVyZTogc3RhdGVsZXNzIEFQSSBzZXJ2ZXJzIGJlaGluZCBhIGxvYWQgIgogICAgICAgICJiYWxhbmNlciwgUmVkaXMgZm9yIGNhY2hpbmcgaG90IHByb2R1Y3QgZGF0YSwgUG9zdGdyZVNRTCB3aXRoIHJlYWQgcmVwbGljYXMgIgogICAgICAgICJmb3IgcGVyc2lzdGVuY2UsIGFuZCBLYWZrYSBmb3IgYXN5bmMgb3JkZXIgcHJvY2Vzc2luZy4gUmF0ZSBsaW1pdGluZyBhdCB0aGUgIgogICAgICAgICJnYXRld2F5LCBhbmQgaWRlbXBvdGVuY3kga2V5cyBvbiBvcmRlciBjcmVhdGlvbiB0byBoYW5kbGUgcmV0cmllcyBzYWZlbHkuIgogICAgKQogICAgYXNzZXJ0IF9leHRyYWN0X3JvbGVfZnJvbV90ZXh0KGFuc3dlcikgaXMgTm9uZQoKCmRlZiB0ZXN0X2xvbmdfbWVzc2FnZV93aXRoX2Zvcl9waHJhc2VfaXNfaWdub3JlZCgpOgogICAgYXNzZXJ0IF9leHRyYWN0X3JvbGVfZnJvbV90ZXh0KAogICAgICAgICJJbiBteSBsYXN0IGpvYiBJIGJ1aWx0IGRhc2hib2FyZHMgZm9yIHRyYWNraW5nIHVzZXIgZW5nYWdlbWVudCBtZXRyaWNzICIKICAgICAgICAiYWNyb3NzIHRocmVlIHByb2R1Y3QgbGluZXMgYW5kIHByZXNlbnRlZCBmaW5kaW5ncyB0byBzdGFrZWhvbGRlcnMgd2Vla2x5LiIKICAgICkgaXMgTm9uZQo=
+from graph.nodes import _extract_role_from_text
+
+
+def test_extracts_common_software_role():
+    assert _extract_role_from_text("I want to practice for a software engineer role") == "Software Engineer"
+
+
+def test_extracts_data_scientist():
+    assert _extract_role_from_text("Please interview me as a data scientist") == "Data Scientist"
+
+
+def test_extracts_role_from_apply_pattern():
+    role = _extract_role_from_text("I am applying for product designer")
+    assert role is not None
+    assert "product" in role.lower()
+
+
+def test_returns_none_when_role_is_unclear():
+    assert _extract_role_from_text("hello there") is None
+
+
+# --- Regression tests: live end-to-end run 2026-10-04 ---------------------
+def test_extracts_backend_engineer_bare():
+    # The most natural single-phrase input must not fall through to the LLM.
+    assert _extract_role_from_text("backend engineer") == "Backend Engineer"
+
+
+def test_extracts_frontend_engineer_bare():
+    assert _extract_role_from_text("frontend engineer") == "Frontend Engineer"
+
+
+def test_strips_leading_article():
+    assert _extract_role_from_text("I want to interview for the backend engineer role") == "Backend Engineer"
+
+
+def test_long_answer_text_does_not_yield_bogus_role():
+    # "Redis for caching hot product data" must NOT become "Caching Hot Product Data".
+    answer = (
+        "I would use a layered architecture: stateless API servers behind a load "
+        "balancer, Redis for caching hot product data, PostgreSQL with read replicas "
+        "for persistence, and Kafka for async order processing. Rate limiting at the "
+        "gateway, and idempotency keys on order creation to handle retries safely."
+    )
+    assert _extract_role_from_text(answer) is None
+
+
+def test_long_message_with_for_phrase_is_ignored():
+    assert _extract_role_from_text(
+        "In my last job I built dashboards for tracking user engagement metrics "
+        "across three product lines and presented findings to stakeholders weekly."
+    ) is None

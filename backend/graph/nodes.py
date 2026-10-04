@@ -42,6 +42,12 @@ from .prompts import (
 logger = logging.getLogger(__name__)
 resume_retriever = ResumeRetriever()
 
+
+def configure_resume_retriever(retriever: ResumeRetriever) -> None:
+    """Use the application-scoped retriever for upload and graph queries."""
+    global resume_retriever
+    resume_retriever = retriever
+
 # -- Stop signal detection -------------------------------------------------
 # IMPORTANT: We must NOT use substring matching. Words like "done", "finish",
 # "quit", "stop" appear naturally in interview answers.
@@ -302,6 +308,12 @@ def ask_question_node(state: InterviewState) -> Dict[str, Any]:
             history=history,
             top_k=5,
         )
+        logger.info(
+            "[RAG] question context: session=%s uploaded=%s chunks=%d",
+            session_id,
+            state.get("resume_uploaded"),
+            len(resume_chunks),
+        )
     user_answers = state.get("user_answers", [])
 
     # Compute the current interview stage
@@ -382,9 +394,10 @@ def ask_question_node(state: InterviewState) -> Dict[str, Any]:
     if resume_chunks:
         context_block = "\n".join(f"- {chunk}" for chunk in resume_chunks)
         instruction += (
-            f"\n\nResume Context:\n{context_block}\n\n"
-            f"Priority: ask about the candidate's resume projects, internships, or certifications when possible. "
-            f"If the resume contains relevant details, reference them in the question or use them to narrow the focus."
+            f"\n\nRESUME CONTEXT (authoritative source):\n{context_block}\n\n"
+            f"RESUME-GROUNDED REQUIREMENT: You MUST base this question on the resume context. "
+            f"Explicitly mention at least one exact project name, internship, certification, or technology "
+            f"that appears in the context. Do not ask a generic question and do not claim details that are not present."
         )
 
     # Generate question, then validate role alignment. Retry once with a
@@ -615,6 +628,12 @@ def follow_up_node(state: InterviewState) -> Dict[str, Any]:
             history=history,
             top_k=3,
         )
+        logger.info(
+            "[RAG] follow-up context: session=%s uploaded=%s chunks=%d",
+            session_id,
+            state.get("resume_uploaded"),
+            len(resume_chunks),
+        )
 
     instruction = (
         f"The candidate just gave this vague answer to the question '{current_question}': "
@@ -626,9 +645,9 @@ def follow_up_node(state: InterviewState) -> Dict[str, Any]:
     if resume_chunks:
         context_block = "\n".join(f"- {chunk}" for chunk in resume_chunks)
         instruction += (
-            f"\n\nResume Context:\n{context_block}\n\n"
-            f"If possible, make the follow-up question connect to the candidate's resume experience, "
-            f"especially their projects, internships, or certifications."
+            f"\n\nRESUME CONTEXT (authoritative source):\n{context_block}\n\n"
+            f"RESUME-GROUNDED REQUIREMENT: Connect this follow-up to one exact project, internship, "
+            f"certification, or technology named in the context. Do not ask a generic follow-up."
         )
 
     follow_up = chat_completion(
@@ -910,6 +929,12 @@ def generate_feedback_node(state: InterviewState) -> Dict[str, Any]:
             role=role,
             history=history,
             top_k=5,
+        )
+        logger.info(
+            "[RAG] feedback context: session=%s uploaded=%s chunks=%d",
+            session_id,
+            state.get("resume_uploaded"),
+            len(resume_context),
         )
 
     prompt_content = (

@@ -277,6 +277,29 @@ body::before {
   gap: 8px;
 }
 
+.resume-upload-area {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.resume-upload-label {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.resume-file-input {
+  font-size: 0.72rem;
+  color: var(--text-secondary);
+  max-width: 180px;
+}
+
 .btn-ghost {
   background: none;
   border: 1px solid var(--border);

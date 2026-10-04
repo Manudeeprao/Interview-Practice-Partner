@@ -59,6 +59,7 @@ class ResumeIsolationTests(unittest.TestCase):
             self.assertTrue(any("Kubernetes" in hit or "billing" in hit for hit in alice_hits))
             self.assertFalse(any("kindergarten" in hit.lower() for hit in alice_hits))
             self.assertFalse(any("kubernetes" in hit.lower() for hit in bob_hits))
+            store.close()
 
 
 if __name__ == "__main__":

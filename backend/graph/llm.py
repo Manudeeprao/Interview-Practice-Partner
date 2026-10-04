@@ -37,7 +37,9 @@ def get_client() -> Groq:
     return _client
 
 
-MODEL = "llama-3.3-70b-versatile"
+# Groq model IDs can change over time; keep this configurable so deployments
+# can select an account-supported model without changing application code.
+MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-20b")
 
 # Maximum number of history turns to send to avoid hitting token limits.
 # Keeps the system prompt + last N user/assistant pairs.
@@ -73,7 +75,7 @@ def truncate_history(messages: List[dict], max_turns: int = MAX_HISTORY_TURNS) -
     before_sleep=before_sleep_log(logger, logging.WARNING),
     reraise=True,
 )
-def _call_groq(messages: List[dict], temperature: float = 0.7, max_tokens: int = 1024) -> str:
+def _call_groq(messages: List[dict], temperature: float = 0.7, max_tokens: int = 1024) -> Optional[str]:
     """Raw Groq call with retry logic. Returns the assistant content string."""
     client = get_client()
     response = client.chat.completions.create(
@@ -82,7 +84,8 @@ def _call_groq(messages: List[dict], temperature: float = 0.7, max_tokens: int =
         temperature=temperature,
         max_tokens=max_tokens,
     )
-    return response.choices[0].message.content
+    content = response.choices[0].message.content
+    return content.strip() if content and content.strip() else None
 
 
 # ---------------------------------------------------------------------------

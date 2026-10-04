@@ -74,6 +74,32 @@ def test_resume_upload_endpoint(client):
     assert body["filename"] == "resume.docx"
 
 
+def test_uploaded_resume_reaches_question_prompt(client, monkeypatch):
+    prompts = []
+
+    def capture_chat(system_prompt, history, user_message, **kwargs):
+        prompts.append(user_message)
+        return "Tell me about the payment platform you built."
+
+    monkeypatch.setattr("graph.nodes.chat_completion", capture_chat)
+    payload = {
+        "file": (
+            BytesIO(_docx_bytes("Resume", ["Built a Kubernetes payment platform in Go."])),
+            "resume.docx",
+        ),
+        "session_id": "api-rag",
+    }
+    upload = client.post("/resume/upload", data=payload, content_type="multipart/form-data")
+    assert upload.status_code == 200
+
+    response = client.post(
+        "/chat",
+        json={"session_id": "api-rag", "message": "I want to practice for software engineer"},
+    )
+    assert response.status_code == 200
+    assert any("Kubernetes" in prompt or "payment" in prompt for prompt in prompts)
+
+
 def test_feedback_endpoint_with_transcript(client, llm_mocks):
     response = client.post(
         "/feedback",

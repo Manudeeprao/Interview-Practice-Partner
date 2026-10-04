@@ -18,7 +18,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from graph.graph import get_interview_graph
-from graph.nodes import generate_feedback_node
+from graph.nodes import configure_resume_retriever, generate_feedback_node
 from graph.state import STAGE_INTERVIEW_ACTIVE, STAGE_ROLE_SELECTION, create_initial_state
 from rag.retriever import ResumeRetriever
 from storage import SessionStore
@@ -64,7 +64,15 @@ def run_turn(state: dict, user_message: str, graph=None) -> dict:
 
     snapshot = graph.get_state(config)
     if _snapshot_has_values(snapshot):
-        graph.update_state(config, {"last_user_message": user_message})
+        graph.update_state(
+            config,
+            {
+                "last_user_message": user_message,
+                "resume_uploaded": state.get("resume_uploaded", False),
+                "resume_filename": state.get("resume_filename"),
+                "resume_chunk_count": state.get("resume_chunk_count", 0),
+            },
+        )
         result = graph.invoke(None, config=config)
     else:
         result = graph.invoke(state, config=config)
@@ -101,6 +109,7 @@ def create_app(
     app.config["SESSION_STORE"] = session_store or SessionStore(max_sessions=MAX_SESSIONS)
     app.config["INTERVIEW_GRAPH"] = interview_graph or get_interview_graph()
     app.config["RESUME_RETRIEVER"] = resume_retriever or ResumeRetriever()
+    configure_resume_retriever(app.config["RESUME_RETRIEVER"])
 
     register_routes(app)
     return app

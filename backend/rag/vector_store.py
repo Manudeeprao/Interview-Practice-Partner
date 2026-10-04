@@ -87,3 +87,9 @@ class ResumeVectorStore:
         for doc, meta, distance in zip(docs, metas, distances):
             output.append({"text": doc, "metadata": meta or {}, "distance": distance})
         return output
+
+    def close(self) -> None:
+        """Release the persistent Chroma client, especially on Windows."""
+        close = getattr(self.client, "close", None)
+        if close:
+            close()

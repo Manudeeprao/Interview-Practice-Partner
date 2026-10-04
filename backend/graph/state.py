@@ -33,6 +33,7 @@ class InterviewState(TypedDict):
 
     main_question_count: int
     follow_up_count: int
+    follow_ups_this_question: int
     is_follow_up: bool
     max_questions: int
 
@@ -77,6 +78,7 @@ def create_initial_state(session_id: str) -> dict:
         "role_confirmed": False,
         "main_question_count": 0,
         "follow_up_count": 0,
+        "follow_ups_this_question": 0,
         "is_follow_up": False,
         "max_questions": 7,
         "interview_stage": STAGE_ROLE_SELECTION,

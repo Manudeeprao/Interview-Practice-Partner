@@ -41,3 +41,7 @@ backend/chroma_db/
 *.sqlite
 *.sqlite3
 
+
+# Node
+node_modules/
+frontend/dist/

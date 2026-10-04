@@ -7,6 +7,7 @@ Uses the official `groq` SDK with tenacity for exponential-backoff retries on ra
 import os
 import json
 import logging
+import re
 from typing import List, Optional
 from groq import Groq, RateLimitError, APIStatusError
 from tenacity import (
@@ -91,6 +92,41 @@ def _call_groq(messages: List[dict], temperature: float = 0.7, max_tokens: int =
 # ---------------------------------------------------------------------------
 # Public helpers
 # ---------------------------------------------------------------------------
+_FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL | re.IGNORECASE)
+
+
+def _extract_json(raw: Optional[str]) -> Optional[dict]:
+    """Parse JSON from raw LLM output, tolerating markdown fences and prose.
+
+    Returns the parsed dict, or None when no valid JSON object is found.
+    """
+    if not raw:
+        return None
+    text = raw.strip()
+
+    # Prefer a fenced block if present (handles multi- and single-line fences).
+    fence_match = _FENCE_RE.search(text)
+    if fence_match:
+        text = fence_match.group(1).strip()
+
+    # Direct parse first.
+    try:
+        parsed = json.loads(text)
+        return parsed if isinstance(parsed, dict) else None
+    except json.JSONDecodeError:
+        pass
+
+    # Fall back to the first {...} span in the output.
+    start, end = text.find("{"), text.rfind("}")
+    if 0 <= start < end:
+        try:
+            parsed = json.loads(text[start : end + 1])
+            return parsed if isinstance(parsed, dict) else None
+        except json.JSONDecodeError:
+            return None
+    return None
+
+
 def chat_completion(
     system_prompt: str,
     history: List[dict],
@@ -129,7 +165,8 @@ def structured_completion(
 ) -> Optional[dict]:
     """
     Completion for nodes that require JSON structured output (classifier, feedback).
-    Low temperature for deterministic classification.
+    Low temperature for deterministic classification. Strips markdown fences and
+    retries the LLM call once when the first response is not valid JSON.
     Returns parsed dict or None on failure.
     """
     messages = [
@@ -137,20 +174,29 @@ def structured_completion(
         {"role": "user", "content": user_content},
     ]
 
-    try:
-        raw = _call_groq(messages, temperature=temperature, max_tokens=max_tokens)
-        # Strip markdown code fences if model wraps JSON in ```json ... ```
-        raw = raw.strip()
-        if raw.startswith("```"):
-            lines = raw.split("\n")
-            raw = "\n".join(lines[1:-1]) if len(lines) > 2 else raw
-        return json.loads(raw)
-    except json.JSONDecodeError:
-        logger.warning("structured_completion: JSON parse failed. Raw output: %r", raw if 'raw' in dir() else 'N/A')
-        return None
-    except RateLimitError:
-        logger.error("Groq rate limit in structured_completion.")
-        return None
-    except Exception as e:
-        logger.error("structured_completion error: %s", e)
-        return None
+    def _attempt() -> Optional[dict]:
+        try:
+            raw = _call_groq(messages, temperature=temperature, max_tokens=max_tokens)
+        except RateLimitError:
+            logger.error("Groq rate limit in structured_completion.")
+            return None
+        except Exception as e:
+            logger.error("structured_completion error: %s", e)
+            return None
+        parsed = _extract_json(raw)
+        if parsed is None:
+            logger.warning("structured_completion: JSON parse failed. Raw: %r", raw)
+        return parsed
+
+    parsed = _attempt()
+    if parsed is None:
+        # One retry with an explicit nudge toward bare JSON.
+        logger.info("structured_completion: retrying once after parse failure")
+        messages = messages + [
+            {
+                "role": "user",
+                "content": "Your last response was not valid JSON. Reply with ONLY the JSON object, no fences, no prose.",
+            }
+        ]
+        parsed = _attempt()
+    return parsed

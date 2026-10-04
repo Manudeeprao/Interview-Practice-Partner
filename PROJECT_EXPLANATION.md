@@ -264,11 +264,33 @@ Generates feedback from the current session or from a supplied transcript.
 
 Accepts a PDF or DOCX resume. The file is extracted, chunked, embedded, and stored for the current session.
 
-The upload is limited to 5 MB.
+The upload is limited to 5 MB. The extension and the file's magic bytes are
+both validated.
+
+### `GET /resume/status?session_id=...`
+
+Returns `{uploaded, filename, chunks, session_id}` for a session.
+
+### `DELETE /resume/<session_id>`
+
+Removes the session's resume vectors and clears its resume flags.
+
+### `GET /session/<session_id>`
+
+Returns the session's transcript (`history`), progress (`state_info`), `done`
+flag, and `feedback` — used by the frontend to restore an interview after a
+page refresh.
 
 ### `POST /new_session`
 
-Creates a new session and returns a new session ID.
+Creates a new session and returns a new session ID. When called with
+`{"session_id": "..."}`, it resets that session instead: SQLite state,
+LangGraph checkpoints, and ChromaDB vectors are all wiped.
+
+All error responses share the shape `{error, code}` (for example
+`{"error": "The 'message' field is required.", "code": "missing_message"}`).
+`POST /chat` and `POST /resume/upload` are rate-limited per client IP
+(configurable via `RATE_LIMIT_CHAT_PER_MIN` / `RATE_LIMIT_UPLOAD_PER_MIN`).
 
 ---
 
@@ -284,16 +306,17 @@ Important fields include:
 | `role` | Selected job role |
 | `role_confirmed` | Prevents role re-detection later |
 | `main_question_count` | Number of completed main questions |
-| `follow_up_count` | Number of follow-up questions |
+| `follow_up_count` | Number of follow-up questions (whole interview) |
+| `follow_ups_this_question` | Follow-ups asked for the current question (capped at 2) |
 | `is_follow_up` | Identifies whether the current exchange is a follow-up |
-| `max_questions` | Maximum number of questions |
+| `max_questions` | Maximum number of questions (default 7) |
 | `interview_stage` | Current stage of the interview |
 | `previous_questions` | Prevents duplicate questions |
 | `user_answers` | Stores candidate answers |
 | `current_question` | Question currently being answered |
 | `history` | Full conversation history |
 | `classification` | Last answer classification |
-| `next_node` | Next node to execute |
+| `next_node` | Diagnostic only: last node that ran (routing uses conditional edges, not this field) |
 | `feedback` | Final structured feedback |
 | `done` | Indicates interview completion |
 | `resume_uploaded` | Indicates whether a resume is available |
@@ -464,11 +487,14 @@ The exact topics are controlled by prompts in `backend/graph/prompts.py`.
 
 The project uses the Groq Python SDK.
 
-The configured model is:
+The model is read only from the `GROQ_MODEL` environment variable, with one
+documented default:
 
 ```text
-llama-3.3-70b-versatile
+openai/gpt-oss-20b
 ```
+
+Set `GROQ_MODEL` in `.env` to use a different Groq-supported model.
 
 The API key is loaded from:
 
@@ -509,14 +535,20 @@ Resume support is implemented in `backend/rag/`.
 
 ### Step 2: Chunking
 
-`chunker.py` splits the resume into overlapping text chunks.
+`chunker.py` splits the resume section-by-section. It first detects common
+resume headings (Experience, Projects, Skills, Education, Certifications,
+etc.); text before the first heading is labelled `header`. Each section is
+then split with a `RecursiveCharacterTextSplitter`.
 
 Default values:
 
 ```text
-Chunk size: 500 characters
+Chunk size: 600 characters
 Chunk overlap: 100 characters
 ```
+
+Every chunk carries metadata: `section`, `chunk_index` (global, deterministic),
+and `section_chunk_index`, plus `session_id` once stored.
 
 ### Step 3: Embedding generation
 
@@ -528,15 +560,34 @@ Chunk overlap: 100 characters
 
 Every chunk receives the session ID as metadata. This prevents one session's resume from being retrieved for another session.
 
+`add_resume(session_id, chunks)` deletes the session's existing chunks first,
+so re-uploading a resume replaces it instead of duplicating it, and chunk IDs
+(`"{session_id}:{chunk_index}"`) are deterministic. `delete_session(session_id)`
+removes a session's vectors; it is called when a resume is deleted
+(`DELETE /resume/<session_id>`), when a session is reset (`POST /new_session`
+with a `session_id`), and when old sessions are evicted from the session store.
+
 ### Step 5: Retrieval
 
-`retriever.py` creates a search query using the selected role and conversation history. It retrieves the most relevant resume chunks.
+`retriever.py` builds a focused search query from the selected role, the
+current interview question, and the candidate's last answer (not the whole
+conversation history). It retrieves the top-k most relevant resume chunks
+(default 5 for questions/feedback, 3 for follow-ups) and drops chunks less
+similar than `RAG_MAX_DISTANCE` (cosine distance, default 0.6).
 
-Retrieved chunks are added to prompts for:
+It returns a formatted context string grouped by resume section, plus the
+source section names — or an empty string when the session has no resume.
+Set `DEBUG_RAG=1` to log the retrieved chunks for every turn.
+
+Retrieved context is added to prompts for:
 
 - Question generation.
 - Follow-up generation.
 - Final feedback generation.
+
+Every prompt that receives resume context carries the grounding instruction:
+"Use ONLY the resume context below for personal details. If it does not
+contain the information, do not invent it."
 
 This is called retrieval-augmented generation, or RAG.
 
@@ -546,8 +597,8 @@ This is called retrieval-augmented generation, or RAG.
 
 ### Starting an interview
 
-1. The browser loads `index.html`.
-2. `app.js` creates a session ID.
+1. The React app loads and reads `ipp-session-id` from localStorage.
+2. If a session ID exists, the app calls `GET /session/<id>` to restore the transcript and progress.
 3. The user types or speaks a desired role.
 4. The frontend sends the role to `/chat`.
 5. Flask creates a session state.
@@ -630,7 +681,17 @@ The backend runs at:
 http://localhost:5000
 ```
 
-Then open `frontend/index.html` in a browser.
+Start the frontend (Vite + React):
+
+```powershell
+cd frontend
+npm install
+npm run dev
+```
+
+The frontend runs at `http://localhost:5173` by default. It reads the backend
+URL from `VITE_API_URL` (see `frontend/.env.example`); the Vite config also
+offers an `/api` proxy as a CORS alternative.
 
 Chrome or Edge is recommended for microphone support.
 
@@ -638,25 +699,26 @@ Chrome or Edge is recommended for microphone support.
 
 ## 16. Testing
 
-The current automated test is:
+Run the backend test suite from the repository root:
 
-```text
-backend/tests/test_resume_extraction.py
+```powershell
+pytest
 ```
 
-It verifies that text can be extracted from a DOCX resume.
-
-Additional useful tests would cover:
+The suite covers:
 
 - Role extraction.
 - Stop-signal detection.
-- Question-count increments.
-- Minimum-question enforcement.
-- Classification routing.
-- Feedback fallback behavior.
-- PDF extraction.
-- Resume session isolation.
-- Flask API responses.
+- Question-count increments and the minimum-3-questions rule.
+- Classification routing (LLM mocked).
+- Follow-up cap (the graph advances after 2 vague answers to one question).
+- Feedback fallback behavior when the LLM is unavailable.
+- PDF and DOCX extraction, including scanned/empty PDF rejection.
+- Section-aware chunker metadata.
+- Resume session isolation (session A's resume is never returned for session B).
+- Re-upload replacing old chunks.
+- Structured-output JSON parsing (code fences, retry on invalid JSON).
+- Flask endpoint responses, including the new endpoints below.
 
 ---
 
@@ -670,8 +732,9 @@ Additional useful tests would cover:
 - The role topic list covers common roles more thoroughly than unusual roles.
 - LLM output is nondeterministic.
 - Resume embeddings are stored locally in ChromaDB.
-- The frontend assumes the backend runs on port 5000.
+- The frontend reads the backend URL from `VITE_API_URL` (default `http://localhost:5000`).
 - Adaptive difficulty currently changes between easy, medium, and hard based on answer classification and strength.
+- Follow-ups are capped at 2 per main question; a third vague answer advances the interview.
 
 ---
 
@@ -684,4 +747,4 @@ The project combines four main ideas:
 3. A node-based LLM interview workflow.
 4. A resume RAG pipeline for personalized questions.
 
-The central design is the persistent `InterviewState`. Every user message updates that state, and the `next_node` field determines what the backend should do next. This allows the interview to pause naturally after every question while preserving the role, transcript, counters, classification, resume context, and final feedback.
+The central design is the persistent `InterviewState`. Every user message updates that state, and LangGraph's conditional edges route each turn to the right node (the `next_node` field is diagnostic only — it does not drive dispatch). This allows the interview to pause naturally after every question while preserving the role, transcript, counters, classification, resume context, and final feedback.

@@ -4,24 +4,25 @@ An AI mock interview app that runs a role-based interview, adapts question diffi
 
 ## What it does
 
-- interviews the user in a role-specific workflow
+- interviews the user in a role-specific workflow (7 questions: intro, projects, technical, system design, behavioral)
 - stores session state in SQLite between requests
 - resumes the same compiled LangGraph graph for each session
 - classifies answers as GOOD, VAGUE, OFF_TOPIC, or OUT_OF_SCOPE
 - raises or lowers difficulty depending on answer quality
-- accepts resume uploads in PDF and DOCX format
-- retrieves resume context with ChromaDB + embeddings
-- generates end-of-interview feedback
-- supports browser microphone input and text input
+- caps follow-ups at 2 per question so the interview can never stall
+- accepts resume uploads in PDF and DOCX format, with section-aware chunking and per-session ChromaDB retrieval
+- grounds questions and feedback in the uploaded resume (never invents resume details)
+- generates end-of-interview feedback with a 1–10 readiness score
+- supports browser microphone input (speech recognition) and text-to-speech for interviewer replies
 
 ## Tech stack
 
 - Python + Flask
-- LangGraph compiled StateGraph
-- SQLite session persistence and checkpoints
-- Groq LLM API
+- LangGraph compiled StateGraph (conditional-edge routing, SQLite checkpoints)
+- SQLite session persistence
+- Groq LLM API (model from `GROQ_MODEL`, default `openai/gpt-oss-20b`)
 - ChromaDB + sentence-transformers for resume retrieval
-- Vanilla JavaScript frontend
+- React + Vite frontend (JavaScript)
 
 ## Project structure
 
@@ -30,7 +31,6 @@ interview_practice_partner/
 ├── backend/
 │   ├── app.py
 │   ├── requirements.txt
-│   ├── chroma_db/
 │   ├── graph/
 │   │   ├── graph.py
 │   │   ├── llm.py
@@ -45,88 +45,98 @@ interview_practice_partner/
 │   │   └── vector_store.py
 │   ├── tests/
 │   └── storage.py
-├── frontend/
-│   ├── app.js
-│   ├── index.html
-│   └── style.css
+├── frontend/              # Vite + React app
+│   ├── src/
+│   │   ├── main.jsx
+│   │   ├── App.jsx
+│   │   ├── api/client.js
+│   │   ├── hooks/
+│   │   └── components/
+│   ├── package.json
+│   └── vite.config.js
 ├── README.md
 ├── PROJECT_EXPLANATION.md
-└── venv/
+└── .env.example
 ```
 
 ## Quick start
 
-### 1) Create and activate a virtual environment
+### 1) Backend: virtual environment and dependencies
 
 ```powershell
-cd C:\Users\jupal\OneDrive\Desktop\interview_practice_partner
 python -m venv venv
 .\venv\Scripts\Activate.ps1
-```
-
-### 2) Install backend dependencies
-
-```powershell
 pip install -r backend\requirements.txt
 ```
 
-### 3) Add the Groq API key
+### 2) Add your Groq API key
 
-Create a `.env` file in the project root or inside `backend/` with:
+Copy `.env.example` to `.env` and fill in your values:
 
 ```env
 GROQ_API_KEY=your_key_here
-GROQ_MODEL=openai/gpt-oss-20b
 ```
 
-> The app reads from environment variables at runtime. The default model is configurable via `GROQ_MODEL`.
+Optional overrides (see `.env.example` for the full list): `GROQ_MODEL`,
+`CORS_ORIGINS`, `RATE_LIMIT_CHAT_PER_MIN`, `RAG_MAX_DISTANCE`, `DEBUG_RAG`.
 
-### 4) Start the backend
+### 3) Start the backend
 
 ```powershell
 cd backend
 python app.py
 ```
 
-The backend runs on:
+The backend runs on `http://localhost:5000`.
 
-```text
-http://localhost:5000
-```
-
-### 5) Start the frontend
-
-In a separate terminal:
+### 4) Start the frontend
 
 ```powershell
 cd frontend
-python -m http.server 8000
+npm install
+npm run dev
 ```
 
-Then open:
+The frontend runs on `http://localhost:5173`. It reads the backend URL from
+`VITE_API_URL` (see `frontend/.env.example`); the Vite config also provides an
+`/api` proxy as a CORS alternative.
 
-```text
-http://localhost:8000
-```
+## API endpoints
+
+| Method | Path | Description |
+|---|---|---|
+| GET | `/health` | Health check + session count |
+| POST | `/chat` | Send a message (`session_id`, `message`) — rate-limited |
+| POST | `/feedback` | Generate feedback from session or transcript |
+| POST | `/new_session` | Create a session; with `{"session_id"}` resets it (state + checkpoints + resume vectors) |
+| GET | `/session/<id>` | Transcript + progress, for restoring after refresh |
+| POST | `/resume/upload` | Upload PDF/DOCX resume (5 MB max, magic-byte validated) — rate-limited |
+| GET | `/resume/status?session_id=...` | `{uploaded, filename, chunks}` |
+| DELETE | `/resume/<id>` | Remove a session's resume |
+
+All errors share the shape `{"error": "...", "code": "..."}`.
 
 ## Runtime behavior
 
-- A new session is created automatically when the frontend first loads.
-- Resume uploads are attached to that session ID.
-- Each chat request resumes the same compiled graph thread for that session.
-- The graph routes responses through conditional logic instead of a manual Flask dispatcher.
-- The app persists the state so the interview can continue across requests.
+- The frontend stores the session ID in localStorage and restores the transcript via `GET /session/<id>` after a refresh.
+- Each `/chat` request resumes the same compiled graph thread for that session.
+- The graph routes responses through conditional edges; the `next_node` field in state is diagnostic only.
+- Vague answers get at most 2 follow-up probes per question, then the interview advances.
+- A stop request ("end the interview", …) is honored once at least 3 questions are answered.
+- Resume vectors are deleted when a resume is removed, a session is reset, or old sessions are evicted.
 
 ## Resume-aware interviewing
 
 The app supports PDF and DOCX resume uploads. Once uploaded:
 
-- the resume text is extracted
-- it is chunked and embedded
-- the chunks are stored per session in ChromaDB
-- the retriever is used to ground interview questions and follow-ups in the uploaded resume
+- the resume text is extracted (scanned/empty PDFs are rejected with a clear error)
+- it is chunked section-by-section (Experience, Projects, Skills, …) with metadata
+- chunks are embedded and stored per session in ChromaDB (re-uploads replace old chunks)
+- retrieval builds its query from the role + current question + last answer, filters by session, and drops low-relevance chunks
 
-This keeps questions more relevant to the candidate's actual background.
+Questions in the Introduction and Project stages reference real projects/skills from the resume when available, and the LLM is instructed to use only the retrieved context for personal details.
+
+Set `DEBUG_RAG=1` to log retrieved chunks per turn.
 
 ## Testing
 
@@ -136,11 +146,12 @@ Run the backend test suite from the repository root:
 pytest
 ```
 
+The suite covers role extraction, stop signals, question counting, the minimum-3-questions rule, classifier routing (mocked LLM), the follow-up cap, feedback fallback, PDF/DOCX extraction, chunker metadata, per-session RAG isolation, re-upload replacement, JSON parsing robustness, and endpoint responses.
+
 ## Notes
 
-- The frontend can use browser speech recognition if the browser allows microphone access.
-- Text input remains available as the fallback path.
-- Only PDF and DOCX resume formats are supported for upload.
+- Only PDF and DOCX resume formats are supported.
+- Voice input/output needs Chrome or Edge with microphone permission; text input always works.
 - The app is designed for local development and demos; production deployment would still need hosting, environment management, and auth/security hardening.
 
 ## Troubleshooting
@@ -151,10 +162,10 @@ If the backend cannot start:
 - make sure all Python dependencies were installed
 - ensure no other process is already using port 5000
 
-If the frontend cannot load:
+If the frontend cannot reach the backend:
 
-- confirm the static server is running on port 8000
-- check that the backend is reachable at `http://localhost:5000/health`
+- confirm the Flask server is running on port 5000
+- check `VITE_API_URL` in `frontend/.env`, or use the Vite `/api` proxy
 
 ## Additional reference
 

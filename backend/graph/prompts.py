@@ -209,6 +209,28 @@ CURRENT STAGE: {stage.upper()}
 Current role (fixed): {role}"""
 
 
+# ---------------------------------------------------------------------------
+# Resume grounding
+# ---------------------------------------------------------------------------
+RESUME_GROUNDING_INSTRUCTION = (
+    "Use ONLY the resume context below for personal details about the candidate "
+    "(project names, internships, certifications, skills, outcomes). "
+    "If the context does not contain the information, do not invent it — "
+    "ask a general question instead."
+)
+
+
+def resume_context_block(context: str) -> str:
+    """Format retrieved resume context for injection into a node instruction."""
+    if not context or not context.strip():
+        return ""
+    return (
+        f"\n\nRESUME CONTEXT (authoritative source — do not invent details):\n"
+        f"{context.strip()}\n\n"
+        f"{RESUME_GROUNDING_INSTRUCTION}"
+    )
+
+
 ROLE_INTAKE_SYSTEM_PROMPT = """You are a friendly interview preparation assistant helping someone set up their mock interview session.
 
 Your job is to:

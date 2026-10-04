@@ -8,7 +8,7 @@ import os
 import sqlite3
 import threading
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -21,11 +21,22 @@ def _utc_now() -> str:
 
 
 class SessionStore:
-    """Persist InterviewState dicts as JSON in SQLite."""
+    """Persist InterviewState dicts as JSON in SQLite.
 
-    def __init__(self, db_path: Optional[str] = None, max_sessions: int = 100) -> None:
+    When the store exceeds ``max_sessions``, the oldest sessions are evicted.
+    Pass ``on_evict`` to clean up per-session resources elsewhere (e.g. the
+    session's ChromaDB resume vectors) when that happens.
+    """
+
+    def __init__(
+        self,
+        db_path: Optional[str] = None,
+        max_sessions: int = 100,
+        on_evict: Optional[Callable[[str], None]] = None,
+    ) -> None:
         self.db_path = db_path or os.getenv("SESSION_DB_PATH", _DEFAULT_DB)
         self.max_sessions = max_sessions
+        self.on_evict = on_evict
         self._lock = threading.Lock()
         directory = os.path.dirname(self.db_path)
         if directory:
@@ -108,6 +119,12 @@ class SessionStore:
             [(sid,) for sid in ids],
         )
         logger.info("Evicted %d oldest session(s): %s", len(ids), ids)
+        if self.on_evict:
+            for sid in ids:
+                try:
+                    self.on_evict(sid)
+                except Exception as exc:  # pragma: no cover - defensive
+                    logger.warning("on_evict failed for session %s: %s", sid, exc)
 
     def close(self) -> None:
         with self._lock:

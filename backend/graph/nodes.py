@@ -36,17 +36,35 @@ from .prompts import (
     ROLE_VALIDATOR_PROMPT,
     get_interviewer_system_prompt,
     get_difficulty_guidance,
+    resume_context_block,
     _get_role_topics,
 )
 
 logger = logging.getLogger(__name__)
-resume_retriever = ResumeRetriever()
+
+# Maximum follow-up probes per main question. After this many VAGUE answers
+# the interview advances anyway so the graph can never loop forever.
+MAX_FOLLOW_UPS_PER_QUESTION = 2
+
+_resume_retriever: Optional[ResumeRetriever] = None
+
+
+def get_resume_retriever() -> ResumeRetriever:
+    """Return the application retriever, creating it lazily.
+
+    Building a ResumeRetriever instantiates the ChromaDB client, so doing it
+    at import time slows down every startup and test collection.
+    """
+    global _resume_retriever
+    if _resume_retriever is None:
+        _resume_retriever = ResumeRetriever()
+    return _resume_retriever
 
 
 def configure_resume_retriever(retriever: ResumeRetriever) -> None:
     """Use the application-scoped retriever for upload and graph queries."""
-    global resume_retriever
-    resume_retriever = retriever
+    global _resume_retriever
+    _resume_retriever = retriever
 
 # -- Stop signal detection -------------------------------------------------
 # IMPORTANT: We must NOT use substring matching. Words like "done", "finish",
@@ -298,23 +316,24 @@ def ask_question_node(state: InterviewState) -> Dict[str, Any]:
     history = state.get("history", [])
     session_id = state.get("session_id")
     main_question_count = state.get("main_question_count", 0)
-    max_questions = state.get("max_questions", 6)
+    max_questions = state.get("max_questions", 7)
     previous_questions = state.get("previous_questions", [])
-    resume_chunks = []
+    user_answers = state.get("user_answers", [])
+    resume_context = ""
     if session_id and state.get("resume_uploaded"):
-        resume_chunks = resume_retriever.retrieve_context(
+        resume_context, _sections = get_resume_retriever().retrieve_context(
             session_id=session_id,
             role=role,
-            history=history,
+            current_question=None,  # question not generated yet
+            last_answer=user_answers[-1] if user_answers else None,
             top_k=5,
         )
         logger.info(
-            "[RAG] question context: session=%s uploaded=%s chunks=%d",
+            "[RAG] question context: session=%s uploaded=%s sections=%s",
             session_id,
             state.get("resume_uploaded"),
-            len(resume_chunks),
+            _sections,
         )
-    user_answers = state.get("user_answers", [])
 
     # Compute the current interview stage
     stage = _compute_stage(main_question_count, max_questions)
@@ -391,14 +410,8 @@ def ask_question_node(state: InterviewState) -> Dict[str, Any]:
             f"your question must still be about {role} skills): \"{last_answer}\""
         )
 
-    if resume_chunks:
-        context_block = "\n".join(f"- {chunk}" for chunk in resume_chunks)
-        instruction += (
-            f"\n\nRESUME CONTEXT (authoritative source):\n{context_block}\n\n"
-            f"RESUME-GROUNDED REQUIREMENT: You MUST base this question on the resume context. "
-            f"Explicitly mention at least one exact project name, internship, certification, or technology "
-            f"that appears in the context. Do not ask a generic question and do not claim details that are not present."
-        )
+    if resume_context:
+        instruction += resume_context_block(resume_context)
 
     # Generate question, then validate role alignment. Retry once with a
     # stricter prompt if the first attempt fails the consistency check.
@@ -475,6 +488,7 @@ def ask_question_node(state: InterviewState) -> Dict[str, Any]:
         "agent_response": question,
         "history": new_history,
         "is_follow_up": False,
+        "follow_ups_this_question": 0,
         "interview_stage": stage,
         "previous_questions": updated_previous,
         "project_question_count": updated_project_count,
@@ -533,6 +547,20 @@ def classify_answer_node(state: InterviewState) -> Dict[str, Any]:
         classification = result.get("classification", "").upper()
         reason = result.get("reason", "")
         if classification in valid_classifications:
+            # Follow-up cap: after MAX_FOLLOW_UPS_PER_QUESTION vague answers
+            # to the same question, accept the thin answer and move on so the
+            # graph can never loop on follow-ups forever.
+            if (
+                classification == "VAGUE"
+                and state.get("follow_ups_this_question", 0) >= MAX_FOLLOW_UPS_PER_QUESTION
+            ):
+                logger.info(
+                    ">>> classify_answer_node: follow-up cap (%d) reached; "
+                    "advancing despite vague answer",
+                    MAX_FOLLOW_UPS_PER_QUESTION,
+                )
+                classification = "GOOD"
+                reason = (reason + " [Follow-up cap reached; moving on.]").strip()
             strength = _infer_strength(classification, result.get("strength"), user_msg)
             difficulty = adjust_difficulty(
                 state.get("difficulty", "medium"),
@@ -577,15 +605,19 @@ def classify_answer_node(state: InterviewState) -> Dict[str, Any]:
             }
 
     # Fail open: ask for more detail if the classifier couldn't respond.
+    # If the follow-up cap is already reached, advance instead of looping.
+    # NOTE: graph routing reads `classification` (conditional edges), so the
+    # cap flips the classification to GOOD to force the advance.
     logger.warning(
         ">>> classify_answer_node: classifier unavailable or malformed output; asking for more detail. Raw: %r",
         result,
     )
+    capped = state.get("follow_ups_this_question", 0) >= MAX_FOLLOW_UPS_PER_QUESTION
     return {
-        "classification": "VAGUE",
+        "classification": "GOOD" if capped else "VAGUE",
         "classification_reason": (
             "Could not classify the answer due to a temporary system issue; "
-            "asking for more detail."
+            + ("moving on (follow-up cap reached)." if capped else "asking for more detail.")
         ),
         "answer_strength": "weak",
         "difficulty": adjust_difficulty(state.get("difficulty", "medium"), "VAGUE", "weak"),
@@ -593,7 +625,7 @@ def classify_answer_node(state: InterviewState) -> Dict[str, Any]:
         "consecutive_weak_answers": state.get("consecutive_weak_answers", 0) + 1,
         "history": updated_history,
         "user_answers": updated_answers,
-        "next_node": "follow_up_node",
+        "next_node": "next_question_node" if capped else "follow_up_node",
     }
 
 
@@ -618,21 +650,23 @@ def follow_up_node(state: InterviewState) -> Dict[str, Any]:
     user_msg = state["last_user_message"]
     current_question = state.get("current_question", "your last answer")
     follow_up_count = state.get("follow_up_count", 0) + 1
+    follow_ups_this_question = state.get("follow_ups_this_question", 0) + 1
     session_id = state.get("session_id")
     role = state.get("role", "General")
-    resume_chunks = []
+    resume_context = ""
     if session_id and state.get("resume_uploaded"):
-        resume_chunks = resume_retriever.retrieve_context(
+        resume_context, _sections = get_resume_retriever().retrieve_context(
             session_id=session_id,
             role=role,
-            history=history,
+            current_question=current_question,
+            last_answer=user_msg,
             top_k=3,
         )
         logger.info(
-            "[RAG] follow-up context: session=%s uploaded=%s chunks=%d",
+            "[RAG] follow-up context: session=%s uploaded=%s sections=%s",
             session_id,
             state.get("resume_uploaded"),
-            len(resume_chunks),
+            _sections,
         )
 
     instruction = (
@@ -642,13 +676,8 @@ def follow_up_node(state: InterviewState) -> Dict[str, Any]:
         f"Current difficulty is {state.get('difficulty', 'medium')}; if easy, keep the probe simpler."
     )
 
-    if resume_chunks:
-        context_block = "\n".join(f"- {chunk}" for chunk in resume_chunks)
-        instruction += (
-            f"\n\nRESUME CONTEXT (authoritative source):\n{context_block}\n\n"
-            f"RESUME-GROUNDED REQUIREMENT: Connect this follow-up to one exact project, internship, "
-            f"certification, or technology named in the context. Do not ask a generic follow-up."
-        )
+    if resume_context:
+        instruction += resume_context_block(resume_context)
 
     follow_up = chat_completion(
         system_prompt=FOLLOW_UP_SYSTEM_PROMPT,
@@ -669,6 +698,7 @@ def follow_up_node(state: InterviewState) -> Dict[str, Any]:
             "history": new_history,
             "is_follow_up": True,
             "follow_up_count": follow_up_count,
+            "follow_ups_this_question": follow_ups_this_question,
             "next_node": "follow_up_node",
         }
 
@@ -683,6 +713,7 @@ def follow_up_node(state: InterviewState) -> Dict[str, Any]:
         "history": new_history,
         "is_follow_up": True,
         "follow_up_count": follow_up_count,
+        "follow_ups_this_question": follow_ups_this_question,
         "next_node": "classify_answer_node",
     }
 
@@ -704,7 +735,7 @@ def next_question_node(state: InterviewState) -> Dict[str, Any]:
     user_msg = state["last_user_message"]
     is_follow_up = state.get("is_follow_up", False)
     current_count = state.get("main_question_count", 0)
-    max_questions = state.get("max_questions", 6)
+    max_questions = state.get("max_questions", 7)
     history = state.get("history", [])
 
     # Entry log — makes the is_follow_up / counter state visible on every turn
@@ -922,19 +953,20 @@ def generate_feedback_node(state: InterviewState) -> Dict[str, Any]:
         transcript_lines.append(f"{prefix}: {msg['content']}")
     transcript = "\n\n".join(transcript_lines)
 
-    resume_context = []
+    resume_context = ""
     if session_id and state.get("resume_uploaded"):
-        resume_context = resume_retriever.retrieve_context(
+        resume_context, _sections = get_resume_retriever().retrieve_context(
             session_id=session_id,
             role=role,
-            history=history,
+            current_question="overall interview performance",
+            last_answer=None,
             top_k=5,
         )
         logger.info(
-            "[RAG] feedback context: session=%s uploaded=%s chunks=%d",
+            "[RAG] feedback context: session=%s uploaded=%s sections=%s",
             session_id,
             state.get("resume_uploaded"),
-            len(resume_context),
+            _sections,
         )
 
     prompt_content = (
@@ -946,9 +978,7 @@ def generate_feedback_node(state: InterviewState) -> Dict[str, Any]:
         f"Full Interview Transcript:\n{transcript}\n\n"
     )
     if resume_context:
-        prompt_content += (
-            "Resume Context:\n" + "\n".join(f"- {chunk}" for chunk in resume_context) + "\n\n"
-        )
+        prompt_content += resume_context_block(resume_context) + "\n\n"
     prompt_content += "Please provide structured feedback on this interview performance."
 
     logger.info(

@@ -1,6 +1,27 @@
 from io import BytesIO
 
+import pytest
 from docx import Document
+
+
+def _fake_embed(texts, batch_size=32):
+    import hashlib
+    import math
+
+    vectors = []
+    for text in texts:
+        digest = hashlib.md5(text.encode("utf-8")).digest()
+        vec = [b / 255.0 for b in digest[:16]]
+        norm = math.sqrt(sum(x * x for x in vec)) or 1.0
+        vectors.append([x / norm for x in vec])
+    return vectors
+
+
+@pytest.fixture(autouse=True)
+def _no_model_download(monkeypatch):
+    """Use deterministic fake embeddings (no transformer download in tests)."""
+    monkeypatch.setattr("rag.vector_store.embed_texts", _fake_embed)
+    monkeypatch.setattr("rag.retriever._MAX_DISTANCE", 10.0)
 
 
 def _docx_bytes(text_heading: str, paragraphs: list[str]) -> bytes:

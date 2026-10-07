@@ -14,7 +14,7 @@ const STATUS_LABELS = {
  * role="log" + aria-live="polite" announces new messages to screen readers.
  * Auto-scrolls to the newest message.
  */
-export function ChatWindow({ messages, thinking, status }) {
+export function ChatWindow({ messages, thinking, status, showSuggestions, onSuggestRole }) {
   const logRef = useRef(null);
 
   useEffect(() => {
@@ -23,6 +23,13 @@ export function ChatWindow({ messages, thinking, status }) {
       el.scrollTop = el.scrollHeight;
     }
   }, [messages, thinking]);
+
+  const suggestions = [
+    'Software Engineer',
+    'Data Analyst',
+    'Product Manager',
+    'Data Scientist',
+  ];
 
   return (
     <section className="chat-panel" aria-label="Interview conversation">
@@ -55,6 +62,23 @@ export function ChatWindow({ messages, thinking, status }) {
           messages.map((m) => <MessageBubble key={m.id} message={m} />)
         )}
         {thinking && <TypingBubble />}
+        {showSuggestions && messages.length === 1 && !thinking && (
+          <div className="chat-empty" style={{ flex: '0 0 auto', paddingTop: 4 }}>
+            <p>Pick a role to start — or type your own below.</p>
+            <div className="role-chips" aria-label="Suggested roles">
+              {suggestions.map((role) => (
+                <button
+                  key={role}
+                  type="button"
+                  className="role-chip"
+                  onClick={() => onSuggestRole?.(role)}
+                >
+                  {role}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
       </div>
     </section>
   );

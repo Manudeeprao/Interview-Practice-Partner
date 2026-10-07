@@ -20,7 +20,10 @@ logger = logging.getLogger(__name__)
 _TOP_K_DEFAULT = 5
 # Cosine distance on normalized embeddings (distance = 1 - similarity).
 # Chunks less similar than this are dropped as irrelevant.
-_MAX_DISTANCE = float(os.getenv("RAG_MAX_DISTANCE", "0.6"))
+# Calibrated against real all-MiniLM-L6-v2 embeddings: short query / long
+# chunk pairs in a single-resume corpus land in the 0.7-1.0 band, so the old
+# 0.6 default silently dropped EVERYTHING. Still overridable via env.
+_MAX_DISTANCE = float(os.getenv("RAG_MAX_DISTANCE", "1.0"))
 _DEBUG_RAG = os.getenv("DEBUG_RAG", "0") == "1"
 
 
@@ -81,16 +84,27 @@ class ResumeRetriever:
         current_question: Optional[str] = None,
         last_answer: Optional[str] = None,
         top_k: int = _TOP_K_DEFAULT,
+        direct_query: Optional[str] = None,
     ) -> List[Dict]:
         """Return ranked chunk dicts (text/metadata/distance) for a session.
 
         Drops chunks less similar than RAG_MAX_DISTANCE. Returns [] cleanly
         when the session has no resume.
+
+        When ``direct_query`` is given (a user's verbatim question about their
+        resume), it is used as the retrieval query instead of the
+        role/question/answer boilerplate — short factual questions
+        ("what is my name?") otherwise get drowned out by the boilerplate.
         """
         if not session_id or not self.has_resume(session_id):
             return []
 
-        query = self.build_query(role, current_question, last_answer)
+        if direct_query and direct_query.strip():
+            # Use the raw question: extra boilerplate only dilutes the embedding
+            # and pushes true matches past the distance cutoff.
+            query = direct_query.strip()[:500]
+        else:
+            query = self.build_query(role, current_question, last_answer)
         results = self.vector_store.query(session_id, query, k=top_k)
         relevant = [r for r in results if r.get("distance", 1.0) <= _MAX_DISTANCE]
 
@@ -116,13 +130,17 @@ class ResumeRetriever:
         current_question: Optional[str] = None,
         last_answer: Optional[str] = None,
         top_k: int = _TOP_K_DEFAULT,
+        direct_query: Optional[str] = None,
     ) -> Tuple[str, List[str]]:
         """Return (formatted context string, source section names).
 
         The context string is empty ("", []) when the session has no resume,
         so callers can branch cleanly.
         """
-        results = self.retrieve(session_id, role, current_question, last_answer, top_k)
+        results = self.retrieve(
+            session_id, role, current_question, last_answer, top_k,
+            direct_query=direct_query,
+        )
         if not results:
             return "", []
 

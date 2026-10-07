@@ -95,6 +95,7 @@ export function MessageInput({
         supported={mic.supported}
         listening={listening}
         permissionError={mic.permissionError}
+        micError={mic.micError}
         disabled={disabled}
         onToggle={onMicToggle}
       />

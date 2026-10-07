@@ -44,7 +44,7 @@ class InterviewState(TypedDict):
     current_question: Optional[str]
     history: List[Message]
     last_user_message: str
-    classification: Optional[Literal["VAGUE", "GOOD", "OFF_TOPIC", "OUT_OF_SCOPE"]]
+    classification: Optional[Literal["VAGUE", "GOOD", "OFF_TOPIC", "OUT_OF_SCOPE", "RESUME_QA"]]
     classification_reason: Optional[str]
     answer_strength: Optional[AnswerStrength]
     difficulty: DifficultyLevel

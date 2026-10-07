@@ -33,6 +33,7 @@ from .prompts import (
     FOLLOW_UP_SYSTEM_PROMPT,
     REDIRECT_SYSTEM_PROMPT,
     DECLINE_SYSTEM_PROMPT,
+    RESUME_QA_SYSTEM_PROMPT,
     ROLE_VALIDATOR_PROMPT,
     get_interviewer_system_prompt,
     get_difficulty_guidance,
@@ -93,6 +94,57 @@ def _contains_stop_signal(text: str) -> bool:
     if lower in STOP_EXACT:
         return True
     return any(phrase in lower for phrase in STOP_PHRASES)
+
+
+# -- Direct resume-question detection --------------------------------------
+# The interviewer must be able to ANSWER questions about the candidate's own
+# resume (e.g. "what is my name?"). These are detected with a cheap heuristic
+# BEFORE the LLM classifier so they cost no API call and are never
+# misclassified as OFF_TOPIC / OUT_OF_SCOPE.
+_RESUME_SELF_REFERENCES = (
+    "my resume", "my cv", "my biodata",
+    "my name",
+    "my project", "my projects",
+    "my experience", "my internship", "my internships",
+    "my skill", "my skills",
+    "my certification", "my certifications",
+    "my education", "my qualification", "my qualifications",
+    "my background",
+    "from my resume", "on my resume", "in my resume",
+    "about me",
+)
+
+_RESUME_KEYWORDS = ("resume", "cv", "biodata", "certification", "internship")
+
+# Message starts that signal a question or an explicit request (lowercased).
+_QUESTION_LEADS = (
+    "what", "which", "who", "whom", "whose", "where", "when", "how", "why",
+    "tell me", "show me", "list", "give me", "summarize", "summarise",
+    "describe", "explain",
+    "do i ", "does my ", "have i ", "am i ", "is there ", "are there ",
+    "can you ", "could you ", "please ", "ask ",
+)
+
+
+def _is_resume_question(text: str) -> bool:
+    """Heuristic: is the user asking a direct question about their own resume?
+
+    Requires BOTH a resume cue (self-reference or keyword) AND a
+    question/request shape, so ordinary interview answers ("I built my
+    project with React") never match.
+    """
+    lowered = (text or "").lower().strip()
+    if not lowered:
+        return False
+    has_cue = (
+        any(ref in lowered for ref in _RESUME_SELF_REFERENCES)
+        or any(kw in lowered for kw in _RESUME_KEYWORDS)
+    )
+    if not has_cue:
+        return False
+    if "?" in text:
+        return True
+    return lowered.startswith(_QUESTION_LEADS)
 
 
 # -- Interview stage calculation -------------------------------------------
@@ -281,8 +333,8 @@ def role_intake_node(state: InterviewState) -> Dict[str, Any]:
         )
         if response is None:
             response = (
-                "I'm temporarily unable to continue right now due to API traffic. "
-                "Please wait a moment and try again."
+                "The AI service is busy right now (rate limit). "
+                "Please wait about 30 seconds and try again."
             )
             new_history = history + [
                 {"role": "assistant", "content": response},
@@ -438,8 +490,8 @@ def ask_question_node(state: InterviewState) -> Dict[str, Any]:
 
         if candidate_q is None:
             error_msg = (
-                "I'm temporarily unable to generate the next question due to API traffic. "
-                "Please wait a moment and try again."
+                "The AI service is busy right now (rate limit) so I couldn't generate the next question. "
+                "Please wait about 30 seconds and try again."
             )
             new_history = history + [{"role": "assistant", "content": error_msg}]
             return {
@@ -537,6 +589,19 @@ def classify_answer_node(state: InterviewState) -> Dict[str, Any]:
             "history": updated_history,
             "user_answers": updated_answers,
             "next_node": "next_question_node",
+        }
+
+    # Direct questions about the candidate's own resume are answered from the
+    # indexed resume via RAG. The heuristic runs before the LLM classifier so
+    # it costs no API call and is never misrouted to redirect/decline.
+    if state.get("resume_uploaded") and _is_resume_question(user_msg):
+        logger.info(">>> classify_answer_node: RESUME_QA detected in '%s'", user_msg[:60])
+        return {
+            "classification": "RESUME_QA",
+            "classification_reason": "User asked a direct question about their own resume",
+            "history": updated_history,
+            "user_answers": updated_answers,
+            "next_node": "resume_qa_node",
         }
 
     prompt_content = (
@@ -699,8 +764,8 @@ def follow_up_node(state: InterviewState) -> Dict[str, Any]:
 
     if follow_up is None:
         follow_up = (
-            "I'm temporarily unable to continue right now due to API traffic. "
-            "Please wait a moment and try again."
+            "The AI service is busy right now (rate limit). "
+            "Please wait about 30 seconds and try again."
         )
         new_history = history + [{"role": "assistant", "content": follow_up}]
         return {
@@ -875,8 +940,8 @@ def redirect_node(state: InterviewState) -> Dict[str, Any]:
 
     if redirect_response is None:
         redirect_response = (
-            "I’m temporarily unable to continue right now due to API traffic. "
-            "Please wait a moment and try again."
+            "The AI service is busy right now (rate limit). "
+            "Please wait about 30 seconds and try again."
         )
         new_history = history + [{"role": "assistant", "content": redirect_response}]
         return {
@@ -921,8 +986,8 @@ def decline_node(state: InterviewState) -> Dict[str, Any]:
 
     if decline_response is None:
         decline_response = (
-            "I’m temporarily unable to continue right now due to API traffic. "
-            "Please wait a moment and try again."
+            "The AI service is busy right now (rate limit). "
+            "Please wait about 30 seconds and try again."
         )
         new_history = history + [{"role": "assistant", "content": decline_response}]
         return {
@@ -936,6 +1001,91 @@ def decline_node(state: InterviewState) -> Dict[str, Any]:
     new_history = history + [{"role": "assistant", "content": decline_response}]
     return {
         "agent_response": decline_response,
+        "history": new_history,
+        "next_node": "classify_answer_node",
+    }
+
+
+# ---------------------------------------------------------------------------
+# Node 7b: resume_qa_node (triggered on RESUME_QA)
+# ---------------------------------------------------------------------------
+def resume_qa_node(state: InterviewState) -> Dict[str, Any]:
+    """
+    Answers a direct user question about their own resume using RAG.
+
+    Reached from classify_answer_node when _is_resume_question() matches and a
+    resume is indexed for the session. The user's verbatim question is used as
+    the retrieval query (no boilerplate) so short factual questions match the
+    right chunks. Never invents resume details; redirects back to the pending
+    interview question afterwards.
+
+    The turn ends here: the graph routes back to classify_answer_node, which
+    is an interrupt point, so the next user message resumes the interview
+    normally. Question counters and difficulty are left untouched.
+    """
+    history = state.get("history", [])
+    user_msg = state["last_user_message"]
+    current_question = state.get("current_question")
+    session_id = state.get("session_id")
+    role = state.get("role", "General")
+
+    resume_context = ""
+    if session_id and state.get("resume_uploaded"):
+        resume_context, _sections = get_resume_retriever().retrieve_context(
+            session_id=session_id,
+            role=role,
+            direct_query=user_msg,
+            top_k=5,
+        )
+        logger.info(
+            "[RAG] resume-QA context: session=%s sections=%s",
+            session_id,
+            _sections,
+        )
+
+    instruction = (
+        f"The candidate asked this direct question about their own resume: "
+        f"'{user_msg}'. Answer it from the resume context below."
+    )
+    if current_question:
+        instruction += (
+            f" Afterwards, invite them to continue by answering your pending "
+            f"interview question: '{current_question}'"
+        )
+    if resume_context:
+        instruction += resume_context_block(resume_context)
+    else:
+        instruction += (
+            "\n\nNo resume context was retrieved for this session. Tell the candidate "
+            "you don't have their resume details available and ask them to re-upload "
+            "their resume if they want resume-based answers."
+        )
+
+    answer = chat_completion(
+        system_prompt=RESUME_QA_SYSTEM_PROMPT,
+        history=history,
+        user_message=instruction,
+        temperature=0.3,
+        max_tokens=220,
+    )
+
+    if answer is None:
+        answer = (
+            "The AI service is busy right now (rate limit). "
+            "Please wait about 30 seconds and ask your resume question again."
+        )
+        new_history = history + [{"role": "assistant", "content": answer}]
+        return {
+            "agent_response": answer,
+            "history": new_history,
+            "next_node": "resume_qa_node",
+        }
+
+    logger.info(">>> resume_qa_node: answered resume question (%d chars)", len(answer))
+
+    new_history = history + [{"role": "assistant", "content": answer}]
+    return {
+        "agent_response": answer,
         "history": new_history,
         "next_node": "classify_answer_node",
     }

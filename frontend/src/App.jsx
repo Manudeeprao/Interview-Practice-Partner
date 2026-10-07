@@ -61,13 +61,21 @@ function App() {
     };
   }, []);
 
-  // ── Speech recognition → auto-send dictated answers ──────────
+  // ── Speech recognition → dictate into the answer box ──────────
+  // Final transcripts accumulate into the input so the candidate can review
+  // and edit before sending — fragments are never auto-sent.
   const recognition = useSpeechRecognition({
-    onFinal: (text) => {
-      setInputText('');
-      sendMessage(text);
+    onFinal: (fullText) => {
+      setInputText(fullText);
     },
   });
+
+  // Surface mic problems as toasts instead of failing silently.
+  useEffect(() => {
+    if (recognition.micError) {
+      notify(recognition.micError, 'warning', 6000);
+    }
+  }, [recognition.micError, notify]);
 
   const handleMicToggle = useCallback(() => {
     if (recognition.listening) {
@@ -96,6 +104,13 @@ function App() {
     sendMessage(inputText);
     setInputText('');
   }, [sendMessage, inputText]);
+
+  const handleSuggestRole = useCallback(
+    (role) => {
+      sendMessage(role);
+    },
+    [sendMessage],
+  );
 
   const handleNewInterview = useCallback(() => {
     // Guard against accidentally wiping an interview in progress.
@@ -149,7 +164,13 @@ function App() {
         </div>
       )}
 
-      <ChatWindow messages={messages} thinking={thinking} status={status} />
+      <ChatWindow
+        messages={messages}
+        thinking={thinking}
+        status={status}
+        showSuggestions={!done && !restoring && !thinking}
+        onSuggestRole={handleSuggestRole}
+      />
 
       {!done && (
         <div className="input-zone" aria-label="Input controls">

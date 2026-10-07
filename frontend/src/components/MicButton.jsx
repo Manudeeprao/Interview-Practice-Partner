@@ -7,6 +7,7 @@ export function MicButton({
   supported,
   listening,
   permissionError,
+  micError,
   disabled,
   onToggle,
 }) {
@@ -41,13 +42,18 @@ export function MicButton({
         disabled={disabled}
         aria-pressed={listening}
         aria-label={listening ? 'Stop recording' : 'Start voice recording'}
-        title={listening ? 'Click to stop recording' : 'Click to record your answer (Ctrl+M)'}
+        title={listening ? 'Click to stop — your words stay in the box for review' : 'Click to dictate your answer (Ctrl+M)'}
       >
         🎤
       </button>
       <span className="mic-label" aria-hidden="true">
         {listening ? 'Stop' : 'Mic'}
       </span>
+      {micError && !listening && (
+        <span className="mic-error-note" role="alert">
+          {micError}
+        </span>
+      )}
     </div>
   );
 }

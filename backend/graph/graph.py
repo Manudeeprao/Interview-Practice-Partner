@@ -24,6 +24,7 @@ from .nodes import (
     generate_feedback_node,
     next_question_node,
     redirect_node,
+    resume_qa_node,
     role_intake_node,
 )
 from .state import InterviewState
@@ -64,6 +65,7 @@ def route_after_classify(state: InterviewState) -> str:
         "GOOD": "next_question_node",
         "OFF_TOPIC": "redirect_node",
         "OUT_OF_SCOPE": "decline_node",
+        "RESUME_QA": "resume_qa_node",
     }
     destination = routing_map.get(classification, "next_question_node")
     logger.debug("route_after_classify: %s → %s", classification, destination)
@@ -134,6 +136,7 @@ def build_interview_graph(checkpointer=None):
     graph.add_node("next_question_node", next_question_node)
     graph.add_node("redirect_node", redirect_node)
     graph.add_node("decline_node", decline_node)
+    graph.add_node("resume_qa_node", resume_qa_node)
     graph.add_node("generate_feedback_node", generate_feedback_node)
     graph.add_node("wait_for_role_input_node", wait_for_role_input_node)
     graph.add_node("wait_for_question_retry_node", wait_for_question_retry_node)
@@ -175,6 +178,7 @@ def build_interview_graph(checkpointer=None):
             "next_question_node": "next_question_node",
             "redirect_node": "redirect_node",
             "decline_node": "decline_node",
+            "resume_qa_node": "resume_qa_node",
         },
     )
 
@@ -190,6 +194,10 @@ def build_interview_graph(checkpointer=None):
     graph.add_edge("follow_up_node", "classify_answer_node")
     graph.add_edge("redirect_node", "classify_answer_node")
     graph.add_edge("decline_node", "classify_answer_node")
+    # resume_qa_node answers the question and hands back to classify_answer_node,
+    # which is an interrupt point — the turn ends and the interview resumes
+    # normally on the next user message.
+    graph.add_edge("resume_qa_node", "classify_answer_node")
     graph.add_edge("generate_feedback_node", END)
 
     if checkpointer is None:

@@ -542,6 +542,7 @@ def _state_info(state: dict) -> dict:
         "current_node": state.get("next_node", "role_intake_node"),
         "classification": state.get("classification"),
         "difficulty": state.get("difficulty", "medium"),
+        "experience_level": state.get("experience_level"),
         "answer_strength": state.get("answer_strength"),
         "resume_uploaded": state.get("resume_uploaded", False),
     }

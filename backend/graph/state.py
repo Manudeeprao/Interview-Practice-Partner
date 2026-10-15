@@ -33,6 +33,7 @@ class InterviewState(TypedDict):
     role_confirmed: bool
     experience_level: Optional[ExperienceLevel]
     experience_level_attempts: int
+    announce_resume_upload: bool
 
     main_question_count: int
     follow_up_count: int
@@ -81,6 +82,7 @@ def create_initial_state(session_id: str) -> dict:
         "role_confirmed": False,
         "experience_level": None,
         "experience_level_attempts": 0,
+        "announce_resume_upload": False,
         "main_question_count": 0,
         "follow_up_count": 0,
         "follow_ups_this_question": 0,

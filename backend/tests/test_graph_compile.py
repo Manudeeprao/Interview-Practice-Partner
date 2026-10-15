@@ -22,11 +22,18 @@ def test_graph_compiles_with_expected_nodes():
 
 def test_compiled_graph_executes_role_intake_and_first_question(llm_mocks):
     compiled = build_interview_graph(checkpointer=MemorySaver())
+    config = {"configurable": {"thread_id": "graph-exec-1"}}
     state = create_initial_state("graph-exec-1")
     state["last_user_message"] = "I want a software engineer interview"
-    result = compiled.invoke(state, config={"configurable": {"thread_id": "graph-exec-1"}})
-    assert result["role_confirmed"] is True
+    result = compiled.invoke(state, config=config)
+    # Two-step intake: role captured, level pending after the first turn.
+    assert result["role_confirmed"] is False
     assert result["role"] == "Software Engineer"
+
+    compiled.update_state(config, {"last_user_message": "fresher"})
+    result = compiled.invoke(None, config=config)
+    assert result["role_confirmed"] is True
+    assert result["experience_level"] == "fresher"
     assert result["current_question"]
     assert result["next_node"] == "classify_answer_node"
 

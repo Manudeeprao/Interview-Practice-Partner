@@ -57,13 +57,21 @@ def test_chat_starts_interview_for_known_role(client):
     payload = response.get_json()
     assert response.status_code == 200
     assert payload["done"] is False
-    assert payload["state_info"]["role_confirmed"] is True
+    # Two-step intake: role captured, experience level still pending.
+    assert payload["state_info"]["role_confirmed"] is False
     assert payload["state_info"]["role"] == "Software Engineer"
-    assert payload["response"]
+    assert "fresher" in payload["response"].lower()
+
+    follow = client.post("/chat", json={"session_id": "api-role", "message": "fresher"})
+    payload2 = follow.get_json()
+    assert payload2["state_info"]["role_confirmed"] is True
+    assert payload2["state_info"]["role"] == "Software Engineer"
+    assert payload2["response"]
 
 
 def test_chat_routes_vague_answer_to_follow_up(client):
     client.post("/chat", json={"session_id": "api-vague", "message": "software engineer please"})
+    client.post("/chat", json={"session_id": "api-vague", "message": "fresher"})
     response = client.post("/chat", json={"session_id": "api-vague", "message": "I did stuff"})
     payload = response.get_json()
     assert payload["state_info"]["classification"] == "VAGUE"
@@ -72,10 +80,12 @@ def test_chat_routes_vague_answer_to_follow_up(client):
 
 def test_chat_routes_off_topic_and_out_of_scope(client):
     client.post("/chat", json={"session_id": "api-off", "message": "software engineer"})
+    client.post("/chat", json={"session_id": "api-off", "message": "junior"})
     off_topic = client.post("/chat", json={"session_id": "api-off", "message": "Let's talk about pepperoni pizza"})
     assert off_topic.get_json()["state_info"]["classification"] == "OFF_TOPIC"
 
     client.post("/chat", json={"session_id": "api-scope", "message": "software engineer"})
+    client.post("/chat", json={"session_id": "api-scope", "message": "senior"})
     out_of_scope = client.post(
         "/chat",
         json={"session_id": "api-scope", "message": "Please write my resume for this job"},
@@ -116,6 +126,13 @@ def test_uploaded_resume_reaches_question_prompt(client, monkeypatch):
     response = client.post(
         "/chat",
         json={"session_id": "api-rag", "message": "I want to practice for software engineer"},
+    )
+    assert response.status_code == 200
+    # Two-step intake: answer the experience-level question, then the first
+    # interview question is generated with resume context.
+    response = client.post(
+        "/chat",
+        json={"session_id": "api-rag", "message": "fresher"},
     )
     assert response.status_code == 200
     assert any("Kubernetes" in prompt or "payment" in prompt for prompt in prompts)

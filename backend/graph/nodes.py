@@ -217,20 +217,93 @@ def _extract_role_from_text(text: str) -> str | None:
     return None
 
 
+# -- Experience-level detection --------------------------------------------
+# A B.Tech fresher must never get Paxos-vs-Raft questions. The level is asked
+# explicitly at intake (two-step flow in role_intake_node) and parsed here.
+_EXPERIENCE_WORDS = {"fresher", "junior", "senior"}
+
+_FRESHER_CUES = (
+    "fresher", "fresh graduate", "recent graduate", "new grad",
+    "entry level", "entry-level", "student", "0 years", "no experience",
+    "b.tech", "btech", "undergrad",
+)
+_JUNIOR_CUES = (
+    "junior", "1 year", "2 years", "1-3 years", "one year", "two years",
+    "early career", "early-career",
+)
+_SENIOR_CUES = (
+    "senior", "3+ years", "4 years", "5 years", "lead", "staff",
+    "principal", "experienced",
+)
+
+
+def _parse_experience_level(text: str) -> str | None:
+    """Map free text to fresher/junior/senior. Returns None when unclear."""
+    lowered = (text or "").lower().strip()
+    if not lowered:
+        return None
+    # Whole-word match on the bare labels first ("Fresher", "junior", "Sr").
+    words = set(re.findall(r"[a-z+]+", lowered))
+    if words & {"fresher", "freshers"}:
+        return "fresher"
+    if words & {"junior", "jr"}:
+        return "junior"
+    if words & {"senior", "sr"}:
+        return "senior"
+    for cue in _FRESHER_CUES:
+        if cue in lowered:
+            return "fresher"
+    for cue in _JUNIOR_CUES:
+        if cue in lowered:
+            return "junior"
+    for cue in _SENIOR_CUES:
+        if cue in lowered:
+            return "senior"
+    return None
+
+
+# -- Single-question validation --------------------------------------------
+# The interviewer prompt says "ask ONE question", but the model still emits
+# numbered multi-part questions ("1. ... 2. ..."). This validates the shape
+# so ask_question_node can retry with a stricter instruction.
+_NUMBERED_ITEM_RE = re.compile(r"(?m)^\s*\d+[.)]\s+\S")
+_QUESTION_MARK_RE = re.compile(r"\?")
+
+
+def _is_single_question(text: str) -> bool:
+    """True when the text asks exactly one question (no numbered sub-parts)."""
+    stripped = (text or "").strip()
+    if not stripped:
+        return False
+    if len(_NUMBERED_ITEM_RE.findall(stripped)) >= 2:
+        return False
+    if len(_QUESTION_MARK_RE.findall(stripped)) >= 2:
+        return False
+    return True
+
+
 DIFFICULTY_LEVELS = ("easy", "medium", "hard")
 
 
-def adjust_difficulty(current: str, classification: str, strength: Optional[str] = None) -> str:
-    """Move interview difficulty up after strong answers and down after weak ones."""
+def adjust_difficulty(current: str, classification: str, strength: Optional[str] = None, experience_level: Optional[str] = None) -> str:
+    """Move interview difficulty up after strong answers and down after weak ones.
+
+    Freshers are capped at medium — no Paxos-vs-Raft for a B.Tech student no
+    matter how well they answer.
+    """
     level = current if current in DIFFICULTY_LEVELS else "medium"
     index = DIFFICULTY_LEVELS.index(level)
     normalized_strength = (strength or "").lower()
 
     if classification == "GOOD" and normalized_strength == "strong":
-        return DIFFICULTY_LEVELS[min(index + 1, len(DIFFICULTY_LEVELS) - 1)]
-    if classification == "VAGUE" or normalized_strength == "weak":
-        return DIFFICULTY_LEVELS[max(index - 1, 0)]
-    return level
+        new_index = min(index + 1, len(DIFFICULTY_LEVELS) - 1)
+    elif classification == "VAGUE" or normalized_strength == "weak":
+        new_index = max(index - 1, 0)
+    else:
+        return level
+    if (experience_level or "").lower() == "fresher":
+        new_index = min(new_index, DIFFICULTY_LEVELS.index("medium"))
+    return DIFFICULTY_LEVELS[new_index]
 
 
 def _infer_strength(classification: str, provided: Optional[str], answer: str) -> str:
@@ -277,11 +350,71 @@ def _validate_question_role_alignment(question: str, role: str) -> bool:
     return True
 
 
+def _confirm_role_and_start(state, role, experience_level, user_msg, history, defaulted=False):
+    """Shared terminal step: role + experience level both known -> start interview."""
+    level_label = {"fresher": "fresher", "junior": "junior (1-3 years)",
+                   "senior": "senior (3+ years)"}.get(experience_level, experience_level)
+    default_note = " (I'll assume fresher level for now)" if defaulted else ""
+    response = (
+        f"Great choice! Let's begin your **{role}** interview at **{level_label}** level{default_note}. "
+        f"I'll ask you 7 questions covering projects, technical fundamentals, system design, and behavioral topics. "
+        f"Take your time with each answer — there's no rush. Ready? Let's go!"
+    )
+    new_history = history + [
+        {"role": "user", "content": user_msg},
+        {"role": "assistant", "content": response},
+    ]
+    logger.info(
+        ">>> role_intake_node: role='%s' level='%s' confirmed -> INTERVIEW_ACTIVE",
+        role, experience_level,
+    )
+    return {
+        "role": role,
+        "role_confirmed": True,
+        "experience_level": experience_level,
+        "interview_stage": "INTERVIEW_ACTIVE",
+        "difficulty": "easy" if experience_level == "fresher" else "medium",
+        "agent_response": response,
+        "history": new_history,
+        "question_generation_failed": False,
+        "ready_for_feedback": False,
+        "next_node": "ask_question_node",
+    }
+
+
+def _ask_experience_level(state, role, user_msg, history, attempts):
+    """Ask the candidate for their experience level (step 2 of intake)."""
+    response = (
+        f"Got it — **{role}**. One quick question so I can calibrate the difficulty: "
+        f"are you a **fresher**, a **junior** (1-3 years of experience), "
+        f"or a **senior** (3+ years)?"
+    )
+    new_history = history + [
+        {"role": "user", "content": user_msg},
+        {"role": "assistant", "content": response},
+    ]
+    logger.info(">>> role_intake_node: role='%s' pending, asking experience level", role)
+    return {
+        "role": role,
+        "role_confirmed": False,
+        "experience_level": None,
+        "experience_level_attempts": attempts,
+        "agent_response": response,
+        "history": new_history,
+        "next_node": "role_intake_node",
+    }
+
+
 def role_intake_node(state: InterviewState) -> Dict[str, Any]:
     """
-    Extracts the target job role from the user's message.
-    If unclear, asks a clarifying question (loops back to itself).
-    Sets role_confirmed=True once a role is identified.
+    Two-step intake: extracts the target job role, then asks for the
+    candidate's experience level (fresher/junior/senior) so question
+    difficulty and scope stay calibrated — a B.Tech fresher should never
+    get Paxos-vs-Raft questions.
+
+    The level can also arrive in the same message as the role
+    ("software engineer fresher") or before the role ("I'm a fresher").
+    Sets role_confirmed=True only once both are known.
 
     IMPORTANT: This node must NEVER be called after role_confirmed=True.
     The run_turn stage guard prevents this, but this hard guard is a
@@ -298,60 +431,91 @@ def role_intake_node(state: InterviewState) -> Dict[str, Any]:
 
     user_msg = state["last_user_message"]
     history = state.get("history", [])
+    attempts = state.get("experience_level_attempts", 0)
+    pending_role = state.get("role")
+    stashed_level = state.get("experience_level")
 
+    # Parse both signals from this message. The level is parsed first so
+    # "I'm a fresher" is never mistaken for a job role.
+    msg_level = _parse_experience_level(user_msg)
+    level = msg_level or stashed_level
     extracted_role = _extract_role_from_text(user_msg)
+    if extracted_role and extracted_role.lower() in _EXPERIENCE_WORDS:
+        extracted_role = None  # e.g. "I'm a fresher" — a level, not a role
+    role = extracted_role or pending_role
 
-
-    if extracted_role:
+    if pending_role and not extracted_role and not msg_level:
+        # Still waiting on the level for the pending role and this reply
+        # didn't parse as one. Ask once more, then default to fresher
+        # rather than looping forever.
+        if attempts >= 1:
+            logger.info(
+                ">>> role_intake_node: experience level unparseable after %d attempts, "
+                "defaulting to fresher", attempts + 1,
+            )
+            return _confirm_role_and_start(state, pending_role, "fresher", user_msg, history, defaulted=True)
+        new_history = history + [
+            {"role": "user", "content": user_msg},
+            {"role": "assistant", "content": (
+                "I didn't quite catch that — are you a **fresher**, a **junior** "
+                "(1-3 years), or a **senior** (3+ years)?"
+            )},
+        ]
+        return {
+            "role": pending_role,
+            "role_confirmed": False,
+            "experience_level": None,
+            "experience_level_attempts": attempts + 1,
+            "agent_response": new_history[-1]["content"],
+            "history": new_history,
+            "next_node": "role_intake_node",
+        }
+    if role and level:
+        # Both known (possibly from the same message) -> start the interview.
+        return _confirm_role_and_start(state, role, level, user_msg, history)
+    if role and not level:
+        # Role known, level still missing -> ask for it (step 2).
+        # A freshly extracted role resets the attempt counter.
+        return _ask_experience_level(
+            state, role, user_msg, history,
+            0 if extracted_role else attempts,
+        )
+    if not role and not pending_role and level:
+        # Level known before the role ("I'm a fresher") — stash it, ask for role.
         response = (
-            f"Great choice! Let's begin your **{extracted_role}** interview. "
-            f"I'll ask you 5-7 questions covering behavioral and role-specific topics. "
-            f"Take your time with each answer -- there's no rush. Ready? Let's go!"
+            "Noted! And which role should I interview you for? "
+            "(e.g. Software Engineer, Data Analyst, Product Manager)"
         )
         new_history = history + [
             {"role": "user", "content": user_msg},
             {"role": "assistant", "content": response},
         ]
-        logger.info(">>> role_intake_node: role='%s' confirmed -> INTERVIEW_ACTIVE", extracted_role)
         return {
-            "role": extracted_role,
-            "role_confirmed": True,
-            "interview_stage": "INTERVIEW_ACTIVE",
+            "role": None,
+            "role_confirmed": False,
+            "experience_level": level,
+            "experience_level_attempts": attempts,
             "agent_response": response,
             "history": new_history,
-            "question_generation_failed": False,
-            "ready_for_feedback": False,
-            "next_node": "ask_question_node",
+            "next_node": "role_intake_node",
         }
-    else:
-        response = chat_completion(
-            system_prompt=ROLE_INTAKE_SYSTEM_PROMPT,
-            history=history,
-            user_message=user_msg,
-            temperature=0.5,
-            max_tokens=200,
-        )
-        if response is None:
-            response = (
-                "The AI service is busy right now (rate limit). "
-                "Please wait about 30 seconds and try again."
-            )
-            new_history = history + [
-                {"role": "assistant", "content": response},
-            ]
-            return {
-                "role": None,
-                "role_confirmed": False,
-                "agent_response": response,
-                "history": new_history,
-                "next_node": "role_intake_node",
-            }
 
+    # Neither role nor level recognizable — fall back to the LLM clarifier.
+    response = chat_completion(
+        system_prompt=ROLE_INTAKE_SYSTEM_PROMPT,
+        history=history,
+        user_message=user_msg,
+        temperature=0.5,
+        max_tokens=200,
+    )
+    if response is None:
+        response = (
+            "The AI service is busy right now (rate limit). "
+            "Please wait about 30 seconds and try again."
+        )
         new_history = history + [
-            {"role": "user", "content": user_msg},
             {"role": "assistant", "content": response},
         ]
-        logger.info(">>> role_intake_node: role unclear, looping")
         return {
             "role": None,
             "role_confirmed": False,
@@ -359,6 +523,19 @@ def role_intake_node(state: InterviewState) -> Dict[str, Any]:
             "history": new_history,
             "next_node": "role_intake_node",
         }
+
+    new_history = history + [
+        {"role": "user", "content": user_msg},
+        {"role": "assistant", "content": response},
+    ]
+    logger.info(">>> role_intake_node: role unclear, looping")
+    return {
+        "role": None,
+        "role_confirmed": False,
+        "agent_response": response,
+        "history": new_history,
+        "next_node": "role_intake_node",
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -401,7 +578,10 @@ def ask_question_node(state: InterviewState) -> Dict[str, Any]:
     stage = _compute_stage(main_question_count, max_questions)
     project_question_count = state.get("project_question_count", 0)
     difficulty = state.get("difficulty", "medium")
-    system_prompt = get_interviewer_system_prompt(role, stage=stage, difficulty=difficulty)
+    system_prompt = get_interviewer_system_prompt(
+        role, stage=stage, difficulty=difficulty,
+        experience_level=state.get("experience_level"),
+    )
 
     # Build stage-specific instruction
     if main_question_count == 0:
@@ -501,15 +681,27 @@ def ask_question_node(state: InterviewState) -> Dict[str, Any]:
                 "next_node": "ask_question_node",
             }
 
-        if _validate_question_role_alignment(candidate_q, role):
+        role_ok = _validate_question_role_alignment(candidate_q, role)
+        shape_ok = _is_single_question(candidate_q)
+        if role_ok and shape_ok:
             question = candidate_q
             break
         else:
-            logger.warning(
-                "[ROLE DRIFT] attempt=%d question failed consistency check. "
-                "Retrying with stricter prompt. Role=%s, Q='%s'",
-                attempt + 1, role, candidate_q[:80],
-            )
+            if not role_ok:
+                logger.warning(
+                    "[ROLE DRIFT] attempt=%d question failed consistency check. "
+                    "Retrying with stricter prompt. Role=%s, Q='%s'",
+                    attempt + 1, role, candidate_q[:80],
+                )
+            if not shape_ok:
+                logger.warning(
+                    "[MULTI-PART QUESTION] attempt=%d question has %d sub-parts. "
+                    "Retrying with stricter prompt. Q='%s'",
+                    attempt + 1,
+                    len(_NUMBERED_ITEM_RE.findall(candidate_q))
+                    + len(_QUESTION_MARK_RE.findall(candidate_q)),
+                    candidate_q[:80],
+                )
             # Tighten the instruction for retry
             topics = _get_role_topics(role)
             instruction = (
@@ -517,7 +709,9 @@ def ask_question_node(state: InterviewState) -> Dict[str, Any]:
                 f"The question MUST be directly about one of these topics: "
                 f"{', '.join(topics[:10])}. "
                 f"Do NOT reference any personal projects in the question itself. "
-                f"Just ask a focused {role} interview question."
+                f"Ask EXACTLY ONE question. No numbered lists, no sub-parts, "
+                f"no 'first... second...'. End with a single question mark. "
+                f"Just ask one focused {role} interview question."
             )
             if previous_questions:
                 instruction += (
@@ -641,6 +835,7 @@ def classify_answer_node(state: InterviewState) -> Dict[str, Any]:
                 state.get("difficulty", "medium"),
                 classification,
                 strength,
+                state.get("experience_level"),
             )
             strong_streak = state.get("consecutive_strong_answers", 0)
             weak_streak = state.get("consecutive_weak_answers", 0)

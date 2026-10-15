@@ -182,6 +182,27 @@ def run_turn(state: dict, user_message: str, graph=None) -> dict:
     if merged.get("role_confirmed") and merged.get("interview_stage") == STAGE_ROLE_SELECTION:
         merged["interview_stage"] = STAGE_INTERVIEW_ACTIVE
 
+    # One-shot resume-upload acknowledgment. If the resume landed (possibly
+    # mid-interview), open this turn's interviewer message by confirming
+    # receipt so the candidate knows it will be used — they should never
+    # need to say "refer to my resume" themselves.
+    if merged.get("announce_resume_upload") and merged.get("agent_response"):
+        ack = "Thanks — I've received your resume and I'll refer to your projects as we go. "
+        merged["agent_response"] = ack + merged["agent_response"]
+        history = merged.get("history") or []
+        if history and history[-1].get("role") == "assistant":
+            last = history[-1]
+            history[-1] = {**last, "content": ack + last.get("content", "")}
+            merged["history"] = history
+        merged["announce_resume_upload"] = False
+        # Also clear it in the graph checkpoint, or the stale True value
+        # would resurrect on the next turn's invoke.
+        try:
+            graph.update_state(config, {"announce_resume_upload": False})
+        except Exception:
+            logger.warning("[TURN] could not clear announce flag in checkpoint", exc_info=True)
+        logger.info("[TURN] resume-upload acknowledgment prepended")
+
     logger.info(
         "[TURN END] Stage=%s | Q=%d/%d | Classification=%s | Difficulty=%s | NextNode=%s | Done=%s",
         merged.get("interview_stage", "?"),
@@ -430,6 +451,9 @@ def register_routes(app: Flask) -> None:
             state["resume_uploaded"] = True
             state["resume_filename"] = filename
             state["resume_chunk_count"] = len(indexed_chunks)
+            # One-shot flag: the next interviewer message opens by confirming
+            # receipt, so a mid-interview upload is never met with silence.
+            state["announce_resume_upload"] = True
             store.save(state)
 
             graph = current_app.config["INTERVIEW_GRAPH"]
@@ -441,6 +465,7 @@ def register_routes(app: Flask) -> None:
                         "resume_uploaded": True,
                         "resume_filename": filename,
                         "resume_chunk_count": len(indexed_chunks),
+                        "announce_resume_upload": True,
                     },
                 )
 
@@ -542,6 +567,7 @@ def _state_info(state: dict) -> dict:
         "current_node": state.get("next_node", "role_intake_node"),
         "classification": state.get("classification"),
         "difficulty": state.get("difficulty", "medium"),
+        "experience_level": state.get("experience_level"),
         "answer_strength": state.get("answer_strength"),
         "resume_uploaded": state.get("resume_uploaded", False),
     }

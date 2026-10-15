@@ -91,6 +91,7 @@ def test_get_session_roundtrip(client):
     created = client.post("/new_session").get_json()
     sid = created["session_id"]
     client.post("/chat", json={"session_id": sid, "message": "software engineer"})
+    client.post("/chat", json={"session_id": sid, "message": "fresher"})
 
     response = client.get(f"/session/{sid}")
     assert response.status_code == 200

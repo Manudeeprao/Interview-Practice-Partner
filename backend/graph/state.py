@@ -21,6 +21,7 @@ class FeedbackData(TypedDict):
 
 DifficultyLevel = Literal["easy", "medium", "hard"]
 AnswerStrength = Literal["weak", "adequate", "strong"]
+ExperienceLevel = Literal["fresher", "junior", "senior"]
 
 
 class InterviewState(TypedDict):
@@ -30,6 +31,8 @@ class InterviewState(TypedDict):
     session_id: str
     role: Optional[str]
     role_confirmed: bool
+    experience_level: Optional[ExperienceLevel]
+    experience_level_attempts: int
 
     main_question_count: int
     follow_up_count: int
@@ -76,6 +79,8 @@ def create_initial_state(session_id: str) -> dict:
         "session_id": session_id,
         "role": None,
         "role_confirmed": False,
+        "experience_level": None,
+        "experience_level_attempts": 0,
         "main_question_count": 0,
         "follow_up_count": 0,
         "follow_ups_this_question": 0,
